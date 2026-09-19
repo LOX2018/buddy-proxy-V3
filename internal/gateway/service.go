@@ -17,6 +17,7 @@ import (
 	"github.com/wnddd839/codebuddy-proxy/internal/accounts"
 	"github.com/wnddd839/codebuddy-proxy/internal/billing"
 	"github.com/wnddd839/codebuddy-proxy/internal/config"
+	"github.com/wnddd839/codebuddy-proxy/internal/modelpolicy"
 	"github.com/wnddd839/codebuddy-proxy/internal/models"
 	"github.com/wnddd839/codebuddy-proxy/internal/oauth"
 	"github.com/wnddd839/codebuddy-proxy/internal/provider"
@@ -107,6 +108,9 @@ type Service struct {
 	modelsFlight  modelsFlight
 	Pins          *sessionpin.Table
 	Journal       *usagejournal.Journal
+	ModelPolicy   *modelpolicy.Manager
+	// OnActivity 供上层接口把网关侧业务事件写入活动日志（例如自动换号）。
+	OnActivity func(kind string, fields map[string]any)
 
 	probeMu    sync.Mutex
 	probeCache map[string]provider.Reachability
@@ -131,15 +135,16 @@ func New(cfg config.Config, logger *slog.Logger) *Service {
 		logger.Info("usage journal persistence enabled", "path", cfg.UsagePath)
 	}
 	svc := &Service{
-		Pool:     accounts.NewPool(cfg.AccountsPath),
-		Provider: p,
-		OAuth:    oauth.NewClient(p.HTTP),
-		Models:   models.NewLister(),
-		Log:      logger,
-		Started:  time.Now(),
-		oauth:    &OAuthSession{Status: "idle"},
-		Pins:     sessionpin.New(0),
-		Journal:  journal,
+		Pool:        accounts.NewPool(cfg.AccountsPath),
+		Provider:    p,
+		OAuth:       oauth.NewClient(p.HTTP),
+		Models:      models.NewLister(),
+		Log:         logger,
+		Started:     time.Now(),
+		oauth:       &OAuthSession{Status: "idle"},
+		Pins:        sessionpin.New(0),
+		Journal:     journal,
+		ModelPolicy: modelpolicy.New(),
 	}
 	svc.modelsCache = map[string]modelsCacheEntry{}
 	svc.probeCache = map[string]provider.Reachability{}
@@ -395,6 +400,9 @@ func (s *Service) CompleteFromPool(ctx context.Context, opts CompleteOptions) (C
 			_ = s.Pool.MarkResult(selection, false, err.Error(), cooldown)
 			s.refreshCandidateQuotas(ctx, append(append([]string{}, opts.ExcludeIDs...), account.ID), false, site)
 			s.Log.Warn("retrying codebuddy request with next account", "accountId", account.ID, "error", err.Error())
+			if s.OnActivity != nil {
+				s.OnActivity("account-switch", map[string]any{"mode": "auto", "account": strutil.First(account.Label, account.ID), "site": config.NormalizeSite(account.Site), "from": account.ID, "reason": err.Error()})
+			}
 			next := append(append([]string{}, opts.ExcludeIDs...), account.ID)
 			opts.ExcludeIDs = next
 			opts.AccountID = ""
@@ -412,6 +420,9 @@ func (s *Service) CompleteFromPool(ctx context.Context, opts CompleteOptions) (C
 		if !opts.RefreshRetry && s.shouldRefreshAfterFailure(err, selection) {
 			if refreshed, refreshErr := s.refreshSelected(ctx, selection, true); refreshErr == nil && refreshed.Account.BearerToken != account.BearerToken {
 				s.Log.Info("retrying codebuddy request after oauth refresh", "accountId", refreshed.Account.ID)
+				if s.OnActivity != nil {
+					s.OnActivity("account-switch", map[string]any{"mode": "auto", "account": strutil.First(account.Label, account.ID), "site": config.NormalizeSite(account.Site), "from": account.ID, "to": refreshed.Account.ID, "reason": "oauth 凭证刷新后重试"})
+				}
 				opts.AccountID = refreshed.Account.ID
 				opts.RefreshRetry = true
 				opts.RetryDepth++
@@ -1167,7 +1178,7 @@ func (s *Service) resetOAuthSessionLocked(site, label, publicOrigin string) {
 	s.oauth.Token = strutil.RandomHex(16)
 	s.oauth.Status = "starting"
 	s.oauth.Site = config.NormalizeSite(strutil.First(site, s.Config().Site, "global"))
-	s.oauth.Label = strutil.First(label, "CodeBuddy OAuth")
+	s.oauth.Label = strutil.Compact(label)
 	s.oauth.StartedAt = time.Now().UnixMilli()
 	s.oauth.UpdatedAt = s.oauth.StartedAt
 	s.oauth.LaunchURL = fmt.Sprintf("%s/direct-admin/codebuddy/oauth/launch?id=%s&token=%s", strings.TrimRight(publicOrigin, "/"), url.QueryEscape(s.oauth.ID), url.QueryEscape(s.oauth.Token))

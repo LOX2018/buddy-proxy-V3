@@ -9,20 +9,25 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/wnddd839/codebuddy-proxy/internal/accounts"
+	"github.com/wnddd839/codebuddy-proxy/internal/activitylog"
 	"github.com/wnddd839/codebuddy-proxy/internal/admin"
 	"github.com/wnddd839/codebuddy-proxy/internal/billing"
 	"github.com/wnddd839/codebuddy-proxy/internal/config"
 	"github.com/wnddd839/codebuddy-proxy/internal/gateway"
 	"github.com/wnddd839/codebuddy-proxy/internal/httputil"
+	"github.com/wnddd839/codebuddy-proxy/internal/modelpolicy"
+	"github.com/wnddd839/codebuddy-proxy/internal/models"
 	"github.com/wnddd839/codebuddy-proxy/internal/oauth"
 	"github.com/wnddd839/codebuddy-proxy/internal/openai"
 	"github.com/wnddd839/codebuddy-proxy/internal/opencode"
+	"github.com/wnddd839/codebuddy-proxy/internal/openprivate"
 	"github.com/wnddd839/codebuddy-proxy/internal/provider"
 	"github.com/wnddd839/codebuddy-proxy/internal/sessionpin"
 	"github.com/wnddd839/codebuddy-proxy/internal/strutil"
@@ -33,10 +38,16 @@ import (
 type Server struct {
 	Svc  *gateway.Service
 	HTTP *http.Server
+
+	actOnce sync.Once
+	act     *activitylog.Logger
 }
 
 func New(cfg config.Config, svc *gateway.Service) *Server {
 	s := &Server{Svc: svc}
+	svc.OnActivity = func(kind string, fields map[string]any) {
+		s.LogActivity(kind, fields)
+	}
 	mux := http.NewServeMux()
 	// Go 1.22+ 方法感知路由（http_servemux_patterns）
 	// 避免与方法相关的尾斜杠子树与更深层精确路由冲突。
@@ -65,7 +76,7 @@ func New(cfg config.Config, svc *gateway.Service) *Server {
 	mux.HandleFunc("/", s.handleFallback)
 	s.HTTP = &http.Server{
 		Addr:              cfg.Addr(),
-		Handler:           recoverHandler(svc.Log, mux),
+		Handler:           recoverHandler(svc.Log, mux, func(fields map[string]any) { s.LogActivity("server-error", fields) }),
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       0,
 		WriteTimeout:      0,
@@ -80,12 +91,55 @@ func (s *Server) ListenAndServe() error {
 
 func (s *Server) Shutdown(ctx context.Context) error {
 	err := s.HTTP.Shutdown(ctx)
+	s.closeActivity()
 	if s.Svc != nil {
 		if cerr := s.Svc.Close(); cerr != nil && err == nil {
 			err = cerr
 		}
 	}
 	return err
+}
+
+// activityLogPath 解析活动日志路径：优先 CODEBUDDY_PROXY_ACTIVITY_PATH，
+// 否则使用默认 ~/.codebuddy/activity/activity.log。
+func activityLogPath() string {
+	if p := strings.TrimSpace(os.Getenv("CODEBUDDY_PROXY_ACTIVITY_PATH")); p != "" {
+		return p
+	}
+	if p, err := activitylog.DefaultPath(); err == nil {
+		return p
+	}
+	return "activity.log"
+}
+
+// LogActivity 写入一条活动事件（懒创建日志器；失败仅告警不阻断）。
+func (s *Server) LogActivity(kind string, fields map[string]any) {
+	s.actOnce.Do(func() {
+		l, err := activitylog.New(activityLogPath())
+		if err != nil {
+			s.Svc.Log.Warn("activity log unavailable", "path", activityLogPath(), "error", err.Error())
+			return
+		}
+		s.act = l
+	})
+	if s.act == nil {
+		return
+	}
+	s.act.Record(kind, fields)
+}
+
+// closeActivity 关闭懒创建的活动日志器（幂等），释放文件句柄。
+func (s *Server) closeActivity() {
+	s.actOnce.Do(func() {})
+	if s.act != nil {
+		_ = s.act.Close()
+		s.act = nil
+	}
+}
+
+// ReadActivityLog 返回最近 N 条活动事件（新到旧）与文件字节数。
+func (s *Server) ReadActivityLog(limit int) ([]map[string]any, int64, error) {
+	return activitylog.Tail(activityLogPath(), limit)
 }
 
 func (s *Server) handleOptions(w http.ResponseWriter, r *http.Request) {
@@ -238,6 +292,7 @@ func (s *Server) handleModelInfo(w http.ResponseWriter, r *http.Request, keySite
 	if err != nil || len(models) == 0 {
 		models = s.Svc.ConfiguredModels()
 	}
+	models = s.applyModelPolicy(models)
 	data := make([]map[string]any, 0, len(models))
 	for _, model := range models {
 		if model.ID == "" {
@@ -255,6 +310,7 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request, keySite st
 	if err != nil || len(models) == 0 {
 		models = s.Svc.ConfiguredModels()
 	}
+	models = s.applyModelPolicy(models)
 	created := time.Now().Unix()
 	data := make([]map[string]any, 0, len(models))
 	for _, model := range models {
@@ -300,6 +356,19 @@ func resolveRequestSite(modelSite, headerSite, keySite string) string {
 	return config.OptionalSite(keySite)
 }
 
+// applyModelPolicy 按模型白名单过滤对外模型目录。
+func (s *Server) applyModelPolicy(list []models.Model) []models.Model {
+	if s.Svc == nil || s.Svc.ModelPolicy == nil {
+		return list
+	}
+	pol, err := s.Svc.ModelPolicy.Read()
+	if err != nil {
+		return list
+	}
+	kept, _ := pol.Filter(list)
+	return kept
+}
+
 func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request, keySite string) {
 	var body struct {
 		Model               string           `json:"model"`
@@ -327,6 +396,14 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request, k
 		return
 	}
 	providerModel := gateway.ResolveProviderModel(body.Model)
+	if s.Svc != nil && s.Svc.ModelPolicy != nil {
+		if pol, err := s.Svc.ModelPolicy.Read(); err == nil {
+			if reason := pol.RejectReason(providerModel.Model); reason != "" {
+				httputil.WriteJSON(w, http.StatusBadRequest, openai.NewError(reason, "invalid_request_error"))
+				return
+			}
+		}
+	}
 	promptChars := estimatePromptChars(body.Messages)
 	chatStarted := time.Now()
 	proxyRequestID := s.newProxyRequestID()
@@ -644,6 +721,7 @@ func (s *Server) handleAdminAPI(w http.ResponseWriter, r *http.Request, path str
 			httputil.WriteJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
 			return
 		}
+		s.LogActivity("account-switch", map[string]any{"mode": "manual", "account": "号池", "target": "号池区域", "to": config.NormalizeSite(body.Site)})
 		httputil.WriteJSON(w, http.StatusOK, payload)
 		return
 	case path == "/direct-admin/api/pool-product" && (r.Method == http.MethodPost || r.Method == http.MethodPut):
@@ -656,6 +734,7 @@ func (s *Server) handleAdminAPI(w http.ResponseWriter, r *http.Request, path str
 			httputil.WriteJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
 			return
 		}
+		s.LogActivity("account-switch", map[string]any{"mode": "manual", "account": "上游", "target": "上游产品", "to": body.Product})
 		httputil.WriteJSON(w, http.StatusOK, payload)
 		return
 	case path == "/direct-admin/api/client-config" && r.Method == http.MethodGet:
@@ -684,6 +763,7 @@ func (s *Server) handleAdminAPI(w http.ResponseWriter, r *http.Request, path str
 		payload["generated"] = true
 		payload["envFile"] = envPath
 		payload["note"] = "新 API Key 已写入 " + envPath + "，重启后仍然有效。请同步更新 ZCode / NewAPI 等客户端里的 Key。"
+		s.LogActivity("api-key-generated", map[string]any{"envFile": envPath})
 		httputil.WriteJSON(w, http.StatusOK, payload)
 		return
 	case path == "/direct-admin/api/client-config/bound-keys" && r.Method == http.MethodPost:
@@ -836,7 +916,92 @@ func (s *Server) handleAdminAPI(w http.ResponseWriter, r *http.Request, path str
 		_ = httputil.ReadJSON(r, &body)
 		poolSite := config.NormalizeSite(strutil.First(body.Site, s.Svc.ActivePoolSite()))
 		result := billing.RunPoolCheckin(r.Context(), s.Svc.Provider, store, s.Svc.Config(), poolSite)
+		s.LogActivity("checkin", map[string]any{
+			"site":   result.PoolSite,
+			"account": "号池",
+			"total":  result.Summary.Total,
+			"ok":     result.Summary.CheckedIn,
+			"done":   result.Summary.AlreadyDone,
+			"failed": result.Summary.Failed,
+		})
 		httputil.WriteJSON(w, http.StatusOK, result)
+		return
+	case path == "/direct-admin/api/system/activity" && r.Method == http.MethodGet:
+		limit := 100
+		if raw := strings.TrimSpace(r.URL.Query().Get("limit")); raw != "" {
+			if n, err := strconv.Atoi(raw); err == nil && n > 0 && n <= 500 {
+				limit = n
+			}
+		}
+		entries, size, err := s.ReadActivityLog(limit)
+		if err != nil {
+			httputil.WriteJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+			return
+		}
+		httputil.WriteJSON(w, http.StatusOK, map[string]any{
+			"ok":      true,
+			"path":    activityLogPath(),
+			"size":    size,
+			"entries": entries,
+		})
+		return
+	case path == "/direct-admin/api/system/open-config-dir" && r.Method == http.MethodPost:
+		dir, err := openprivate.ConfigDir()
+		if err != nil {
+			httputil.WriteJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+			return
+		}
+		if err := openprivate.OpenDirectory(dir); err != nil {
+			httputil.WriteJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error(), "path": dir})
+			return
+		}
+		s.LogActivity("open-config-dir", map[string]any{"path": dir})
+		httputil.WriteJSON(w, http.StatusOK, map[string]any{"ok": true, "path": dir})
+		return
+	// 模型白名单（proxy-modelpolicy.json）。
+	case path == "/direct-admin/api/system/model-policy" && r.Method == http.MethodGet:
+		pol, err := s.Svc.ModelPolicy.Read()
+		if err != nil {
+			httputil.WriteJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+			return
+		}
+		httputil.WriteJSON(w, http.StatusOK, map[string]any{
+			"ok":      true,
+			"path":    s.Svc.ModelPolicy.Path(),
+			"policy":  pol,
+			"enabled": pol.Enabled,
+			"allow":   pol.Allow,
+			"deny":    pol.Deny,
+		})
+		return
+	case path == "/direct-admin/api/system/model-policy" && r.Method == http.MethodPut:
+		var body struct {
+			Enabled bool     `json:"enabled"`
+			Allow   []string `json:"allow"`
+			Deny    []string `json:"deny"`
+		}
+		if err := httputil.ReadJSON(r, &body); err != nil {
+			httputil.WriteJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "invalid JSON body"})
+			return
+		}
+		pol := modelpolicy.Policy{Enabled: body.Enabled, Allow: body.Allow, Deny: body.Deny}
+		if err := s.Svc.ModelPolicy.Write(pol); err != nil {
+			httputil.WriteJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+			return
+		}
+		s.LogActivity("model-policy-update", map[string]any{"enabled": pol.Enabled, "allowCount": len(pol.Allow)})
+		httputil.WriteJSON(w, http.StatusOK, map[string]any{
+			"ok":      true,
+			"path":    s.Svc.ModelPolicy.Path(),
+			"policy":  pol,
+			"enabled": pol.Enabled,
+			"allow":   pol.Allow,
+			"deny":    pol.Deny,
+		})
+		return
+	// 各账号签到状态。
+	case path == "/direct-admin/api/codebuddy/checkin-status" && r.Method == http.MethodGet:
+		s.handleCheckinStatus(w, r)
 		return
 	}
 
@@ -845,6 +1010,100 @@ func (s *Server) handleAdminAPI(w http.ResponseWriter, r *http.Request, path str
 		return
 	}
 	httputil.WriteJSON(w, http.StatusNotFound, map[string]any{"ok": false, "error": "unknown admin api"})
+}
+
+func (s *Server) handleCheckinStatus(w http.ResponseWriter, r *http.Request) {
+	store, err := s.Svc.Pool.Read()
+	if err != nil {
+		httputil.WriteJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	poolSite := config.NormalizeSite(s.Svc.ActivePoolSite())
+	var enabled []accounts.Account
+	for _, acct := range store.Accounts {
+		if acct.Enabled && accounts.HasCredentials(acct) && config.NormalizeSite(acct.Site) == poolSite {
+			enabled = append(enabled, acct)
+		}
+	}
+
+	type view struct {
+		AccountID      string `json:"accountId"`
+		Label          string `json:"label"`
+		UserNickname   string `json:"userNickname,omitempty"`
+		UserName       string `json:"userName,omitempty"`
+		UserID         string `json:"userId,omitempty"`
+		Site           string `json:"site"`
+		Active         bool   `json:"active"`
+		TodayCheckedIn bool   `json:"todayCheckedIn"`
+		StreakDays     int    `json:"streakDays"`
+		DailyCredit    int    `json:"dailyCredit"`
+		TodayCredit    int    `json:"todayCredit"`
+		IsStreakDay    bool   `json:"isStreakDay"`
+		Endpoint       string `json:"endpoint,omitempty"`
+		Error          string `json:"error,omitempty"`
+	}
+
+	views := make([]view, len(enabled))
+	const workers = 4
+	jobs := make(chan int)
+	var wg sync.WaitGroup
+	for w := 0; w < workers; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := range jobs {
+				acct := enabled[i]
+				v := view{AccountID: acct.ID, Label: acct.Label, UserNickname: acct.AuthStatus.UserNickname, UserName: acct.AuthStatus.UserName, UserID: acct.AuthStatus.UserID, Site: config.NormalizeSite(acct.Site)}
+				act, endpoint, fetchErr := billing.FetchCheckinActivity(r.Context(), s.Svc.Provider, acct, s.Svc.Config())
+				if fetchErr != nil {
+					v.Error = fetchErr.Error()
+					v.Endpoint = endpoint
+					views[i] = v
+					continue
+				}
+				v.Endpoint = endpoint
+				v.Active = act.Active
+				v.TodayCheckedIn = act.TodayCheckedIn
+				v.StreakDays = act.StreakDays
+				v.DailyCredit = act.DailyCredit
+				v.TodayCredit = act.TodayCredit
+				v.IsStreakDay = act.IsStreakDay
+				views[i] = v
+			}
+		}()
+	}
+	for i := range enabled {
+		jobs <- i
+	}
+	close(jobs)
+	wg.Wait()
+
+	summary := map[string]int{"total": 0, "active": 0, "checkedIn": 0, "pending": 0, "inactive": 0, "failed": 0}
+	for _, v := range views {
+		summary["total"]++
+		if v.Error != "" {
+			summary["failed"]++
+			continue
+		}
+		if !v.Active {
+			summary["inactive"]++
+			continue
+		}
+		summary["active"]++
+		if v.TodayCheckedIn {
+			summary["checkedIn"]++
+		} else {
+			summary["pending"]++
+		}
+	}
+
+	httputil.WriteJSON(w, http.StatusOK, map[string]any{
+		"ok":       true,
+		"poolSite": poolSite,
+		"note":     billing.CheckinNoteForSite(poolSite),
+		"summary":  summary,
+		"accounts": views,
+	})
 }
 
 func (s *Server) handleAccountAction(w http.ResponseWriter, r *http.Request, path string) {
@@ -861,11 +1120,26 @@ func (s *Server) handleAccountAction(w http.ResponseWriter, r *http.Request, pat
 	}
 	switch {
 	case r.Method == http.MethodDelete && action == "":
+		pre, preErr := s.Svc.Pool.Read()
+		if preErr != nil {
+			httputil.WriteJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": preErr.Error()})
+			return
+		}
+		label := id
+		site := ""
+		for _, item := range pre.Accounts {
+			if item.ID == id {
+				label = strutil.First(item.Label, id)
+				site = item.Site
+				break
+			}
+		}
 		store, err := s.Svc.Pool.Delete(id)
 		if err != nil {
 			httputil.WriteJSON(w, http.StatusNotFound, map[string]any{"ok": false, "error": err.Error()})
 			return
 		}
+		s.LogActivity("account-removed", map[string]any{"id": id, "account": label, "site": site})
 		httputil.WriteJSON(w, http.StatusOK, accounts.SummarizeStore(store, s.Svc.Pool.Path()))
 		return
 	case r.Method == http.MethodPost && (action == "enable" || action == "disable"):
@@ -874,11 +1148,47 @@ func (s *Server) handleAccountAction(w http.ResponseWriter, r *http.Request, pat
 			httputil.WriteJSON(w, http.StatusNotFound, map[string]any{"ok": false, "error": err.Error()})
 			return
 		}
+		kind := "account-set"
+		if action == "enable" {
+			kind = "account-enabled"
+		} else if action == "disable" {
+			kind = "account-disabled"
+		}
+		s.LogActivity(kind, map[string]any{"id": id, "account": strutil.First(account.Label, id), "site": account.Site})
 		httputil.WriteJSON(w, http.StatusOK, map[string]any{
 			"ok":       true,
 			"account":  accounts.SummarizeAccount(account),
 			"accounts": accounts.SummarizeStore(store, s.Svc.Pool.Path()),
 		})
+		return
+	case r.Method == http.MethodPost && action == "checkin":
+		store, err := s.Svc.Pool.Read()
+		if err != nil {
+			httputil.WriteJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+			return
+		}
+		var account accounts.Account
+		found := false
+		for _, item := range store.Accounts {
+			if item.ID == id {
+				account = item
+				found = true
+				break
+			}
+		}
+		if !found {
+			httputil.WriteJSON(w, http.StatusNotFound, map[string]any{"ok": false, "error": "account not found"})
+			return
+		}
+		result := billing.DailyCheckinForAccount(r.Context(), s.Svc.Provider, account, s.Svc.Config())
+		s.LogActivity("checkin", map[string]any{
+			"site":    result.Site,
+			"account": strutil.First(account.Label, id),
+			"ok":      result.OK,
+			"already": result.AlreadyCheckedIn,
+			"message": result.Message,
+		})
+		httputil.WriteJSON(w, http.StatusOK, result)
 		return
 	case r.Method == http.MethodGet && action == "usage":
 		store, err := s.Svc.Pool.Read()
@@ -1018,6 +1328,7 @@ func (s *Server) handleOAuthCallback(w http.ResponseWriter, r *http.Request) {
 	}
 	payload, err := s.Svc.PollOAuth(r.Context(), publicOrigin)
 	if err != nil {
+		s.LogActivity("oauth-fail", map[string]any{"error": err.Error()})
 		httputil.WriteHTML(w, http.StatusBadGateway, admin.LaunchPage("CodeBuddy 登录回调失败："+err.Error(), false))
 		return
 	}
@@ -1028,6 +1339,7 @@ func (s *Server) handleOAuthCallback(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		msg = strutil.First(liveAfter.Error, "CodeBuddy 登录尚未完成。")
 	}
+	s.LogActivity("oauth-callback", map[string]any{"ok": ok, "error": liveAfter.Error})
 	status := http.StatusOK
 	if !ok {
 		status = http.StatusConflict

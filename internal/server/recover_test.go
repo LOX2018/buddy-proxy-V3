@@ -13,12 +13,21 @@ func TestRecoverHandlerCatchesPanic(t *testing.T) {
 	panicHandler := http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
 		panic("boom")
 	})
-	handler := recoverHandler(slog.Default(), panicHandler)
+	called := false
+	handler := recoverHandler(slog.Default(), panicHandler, func(fields map[string]any) {
+		called = true
+		if fields["panic"] != "boom" || fields["method"] != http.MethodGet {
+			t.Fatalf("onPanic fields=%v", fields)
+		}
+	})
 
 	req := httptest.NewRequest(http.MethodGet, "http://127.0.0.1/test", nil)
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 
+	if !called {
+		t.Fatal("onPanic not invoked")
+	}
 	if rec.Code != http.StatusInternalServerError {
 		t.Fatalf("status=%d want 500", rec.Code)
 	}

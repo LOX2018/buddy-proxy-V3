@@ -13,6 +13,7 @@ import (
 	"github.com/wnddd839/codebuddy-proxy/internal/config"
 	"github.com/wnddd839/codebuddy-proxy/internal/gateway"
 	"github.com/wnddd839/codebuddy-proxy/internal/server"
+	"github.com/wnddd839/codebuddy-proxy/internal/version"
 )
 
 func main() {
@@ -47,6 +48,12 @@ func main() {
 
 	svc := gateway.New(cfg, logger)
 	srv := server.New(cfg, svc)
+	srv.LogActivity("server-start", map[string]any{
+		"addr":     "http://" + cfg.Addr() + "/v1",
+		"admin":    adminURL(cfg),
+		"version":  version.Version,
+		"platform": cfg.Transport,
+	})
 
 	printStartupBanner(cfg, generatedKey)
 	logger.Debug("codebuddy proxy starting",
@@ -75,6 +82,7 @@ func main() {
 		logger.Info("shutting down", "signal", sig.String())
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
+		srv.LogActivity("server-stop", map[string]any{"signal": sig.String()})
 		if err := srv.Shutdown(ctx); err != nil {
 			logger.Error("shutdown error", "error", err)
 			os.Exit(1)

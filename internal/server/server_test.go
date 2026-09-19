@@ -15,6 +15,7 @@ import (
 	"github.com/wnddd839/codebuddy-proxy/internal/accounts"
 	"github.com/wnddd839/codebuddy-proxy/internal/config"
 	"github.com/wnddd839/codebuddy-proxy/internal/gateway"
+	"github.com/wnddd839/codebuddy-proxy/internal/modelpolicy"
 )
 
 func testServer(t *testing.T, requireAPIKey bool, adminPassword, apiKey string) *Server {
@@ -46,9 +47,13 @@ func testServerCfg(t *testing.T, cfg config.Config) *Server {
 		cfg.Transport = config.DefaultTransport
 	}
 	svc := gateway.New(cfg, slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})))
+	svc.ModelPolicy = modelpolicy.NewWithPath(filepath.Join(t.TempDir(), "policy.json"))
+	t.Setenv("CODEBUDDY_PROXY_ACTIVITY_PATH", filepath.Join(t.TempDir(), "activity.log"))
 	svc.Provider.HTTP = &http.Client{Transport: stubProbeTransport{status: http.StatusUnauthorized, body: "Authorization Required"}}
 	t.Cleanup(func() { _ = svc.Close() })
-	return New(cfg, svc)
+	srv := New(cfg, svc)
+	t.Cleanup(func() { srv.closeActivity() })
+	return srv
 }
 
 func TestResponsesAPIExplainsChatCompletionsOnly(t *testing.T) {
@@ -318,6 +323,48 @@ func TestAdminCSRFAllowsSameOriginMutation(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("same-origin status=%d body=%s", rec.Code, rec.Body.String())
 	}
+}
+
+func TestManualPoolSwitchLogsAccountSwitch(t *testing.T) {
+	srv := testServer(t, false, "", "")
+	t.Setenv("CODEBUDDY_PROXY_ENV_FILE", filepath.Join(t.TempDir(), ".env"))
+	req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:32126/direct-admin/api/pool-site", strings.NewReader(`{"site":"domestic"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Origin", "http://127.0.0.1:32126")
+	req.Host = "127.0.0.1:32126"
+	rec := httptest.NewRecorder()
+	srv.HTTP.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("switch status=%d body=%s", rec.Code, rec.Body.String())
+	}
+
+	actReq := httptest.NewRequest(http.MethodGet, "http://127.0.0.1:32126/direct-admin/api/system/activity?limit=10", nil)
+	actRec := httptest.NewRecorder()
+	srv.HTTP.Handler.ServeHTTP(actRec, actReq)
+	if actRec.Code != http.StatusOK {
+		t.Fatalf("activity status=%d", actRec.Code)
+	}
+	var payload struct {
+		Entries []struct {
+			Kind   string         `json:"kind"`
+			Fields map[string]any `json:"fields"`
+		} `json:"entries"`
+	}
+	if err := json.Unmarshal(actRec.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range payload.Entries {
+		if e.Kind == "account-switch" {
+			if e.Fields["mode"] != "manual" || e.Fields["to"] != "domestic" {
+				t.Fatalf("account-switch fields=%v", e.Fields)
+			}
+			if e.Fields["account"] != "号池" {
+				t.Fatalf("account-switch missing account name: %v", e.Fields)
+			}
+			return
+		}
+	}
+	t.Fatalf("no account-switch event logged: %+v", payload.Entries)
 }
 
 func TestAdminProductSwitchSameOrigin(t *testing.T) {
@@ -726,4 +773,95 @@ func envAPIKeysValue(envText string) string {
 		}
 	}
 	return ""
+}
+
+func TestModelPolicyAdminAPI(t *testing.T) {
+	srv := testServer(t, false, "", "")
+	t.Setenv("CODEBUDDY_PROXY_ENV_FILE", filepath.Join(t.TempDir(), ".env"))
+
+	get := func() map[string]any {
+		req := httptest.NewRequest(http.MethodGet, "http://127.0.0.1:32126/direct-admin/api/system/model-policy", nil)
+		rec := httptest.NewRecorder()
+		srv.HTTP.Handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("GET status=%d body=%s", rec.Code, rec.Body.String())
+		}
+		var payload map[string]any
+		if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+			t.Fatal(err)
+		}
+		return payload
+	}
+
+	if p := get(); p["enabled"] != false {
+		t.Fatalf("default policy should be disabled, got %v", p["enabled"])
+	}
+
+	putReq := httptest.NewRequest(http.MethodPut, "http://127.0.0.1:32126/direct-admin/api/system/model-policy",
+		strings.NewReader(`{"enabled":true,"allow":["gpt-5"],"deny":[]}`))
+	putReq.Header.Set("Content-Type", "application/json")
+	putReq.Header.Set("Origin", "http://127.0.0.1:32126")
+	putReq.Host = "127.0.0.1:32126"
+	putRec := httptest.NewRecorder()
+	srv.HTTP.Handler.ServeHTTP(putRec, putReq)
+	if putRec.Code != http.StatusOK {
+		t.Fatalf("PUT status=%d body=%s", putRec.Code, putRec.Body.String())
+	}
+
+	if p := get(); p["enabled"] != true {
+		t.Fatalf("policy should be enabled, got %v", p["enabled"])
+	}
+
+	pol, err := srv.Svc.ModelPolicy.Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pol.Allow) != 1 || pol.Allow[0] != "gpt-5" {
+		t.Fatalf("allow=%v", pol.Allow)
+	}
+}
+
+func TestModelPolicyFiltersCatalog(t *testing.T) {
+	srv := testServer(t, false, "", "")
+	seedBothSites(t, srv)
+	srv.Svc.Provider.HTTP = &http.Client{Transport: catalogByHostTransport{}}
+	t.Setenv("CODEBUDDY_PROXY_ENV_FILE", filepath.Join(t.TempDir(), ".env"))
+
+	if err := srv.Svc.ModelPolicy.Write(modelpolicy.Policy{Enabled: true, Allow: []string{"gpt-5"}}); err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "http://127.0.0.1:32126/v1/models", nil)
+	req.Header.Set("X-Site", "global")
+	rec := httptest.NewRecorder()
+	srv.HTTP.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	ids := modelIDsFromList(t, rec.Body.Bytes())
+	if !containsID(ids, "gpt-5") || containsID(ids, "deepseek-v4.1-flash") {
+		t.Fatalf("filtered catalog=%v", ids)
+	}
+}
+
+func TestModelPolicyRejectsChat(t *testing.T) {
+	srv := testServer(t, true, "", "secret-key")
+	t.Setenv("CODEBUDDY_PROXY_ENV_FILE", filepath.Join(t.TempDir(), ".env"))
+	if err := srv.Svc.ModelPolicy.Write(modelpolicy.Policy{Enabled: true, Allow: []string{"gpt-5"}}); err != nil {
+		t.Fatal(err)
+	}
+
+	mk := func(model string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:32126/v1/chat/completions",
+			strings.NewReader(`{"model":"`+model+`","messages":[{"role":"user","content":"hi"}]}`))
+		req.Header.Set("Authorization", "Bearer secret-key")
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		srv.HTTP.Handler.ServeHTTP(rec, req)
+		return rec
+	}
+
+	if rec := mk("deepseek-v4.1-flash"); rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "白名单") {
+		t.Fatalf("blocked status=%d body=%s", rec.Code, rec.Body.String())
+	}
 }

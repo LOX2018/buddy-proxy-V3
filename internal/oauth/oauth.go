@@ -258,6 +258,7 @@ func AccountFromTokenData(token *TokenData, site, label string) accounts.Account
 	claims := DecodeJWT(bearer)
 	userID := strutil.First(fmt.Sprint(claims["email"]), fmt.Sprint(claims["preferred_username"]), fmt.Sprint(claims["sub"]))
 	userName := strutil.First(fmt.Sprint(claims["name"]), fmt.Sprint(claims["preferred_username"]), fmt.Sprint(claims["email"]), userID)
+	nickname := strutil.First(fmt.Sprint(claims["nickname"]), userName)
 	loggedIn := true
 	createdAt := time.Now().Unix()
 	expiresAt := int64(0)
@@ -266,8 +267,12 @@ func AccountFromTokenData(token *TokenData, site, label string) accounts.Account
 	} else if exp, ok := asInt64(claims["exp"]); ok {
 		expiresAt = exp * 1000
 	}
+	label = strings.TrimSpace(label)
+	if cfgLabel := strings.ToLower(label); cfgLabel == "codebuddy" || cfgLabel == "codebuddy oauth" {
+		label = ""
+	}
 	return accounts.CreateAccount(accounts.Account{
-		Label:          strutil.First(label, userName, userID, "CodeBuddy"),
+		Label:          strutil.First(label, nickname, userName, userID, "CodeBuddy"),
 		Enabled:        true,
 		Source:         "cli_credential",
 		Site:           config.NormalizeSite(site),

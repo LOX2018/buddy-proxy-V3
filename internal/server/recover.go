@@ -10,7 +10,8 @@ import (
 )
 
 // recoverHandler 捕获 handler panic，记录日志并返回 500，避免整个进程退出。
-func recoverHandler(log *slog.Logger, next http.Handler) http.Handler {
+// onPanic 可选，用于把 panic 写入活动日志（报错日志版块）。
+func recoverHandler(log *slog.Logger, next http.Handler, onPanic func(map[string]any)) http.Handler {
 	if log == nil {
 		log = slog.Default()
 	}
@@ -23,6 +24,13 @@ func recoverHandler(log *slog.Logger, next http.Handler) http.Handler {
 					"path", r.URL.Path,
 					"stack", string(debug.Stack()),
 				)
+				if onPanic != nil {
+					onPanic(map[string]any{
+						"panic":  rec,
+						"method": r.Method,
+						"path":   r.URL.Path,
+					})
+				}
 				httputil.WriteJSON(w, http.StatusInternalServerError, openai.NewError("internal server error", "internal_error"))
 			}
 		}()
