@@ -2,21 +2,19 @@
   <img src="docs/logo.svg" width="88" height="88" alt="Buddy Proxy" />
 </p>
 
-<h1 align="center">Buddy Proxy</h1>
+<h1 align="center">Buddy Proxy V3</h1>
 
 <p align="center">
   <strong>把 CodeBuddy / WorkBuddy 账号，变成任何 OpenAI 客户端都能直连的 <code>/v1</code> 渠道。</strong>
 </p>
 
 <p align="center">
-  <a href="https://wnddd839.github.io/buddy-proxy/"><img src="https://img.shields.io/badge/Product-Page-1C1C1C?style=flat-square" alt="Product Page" /></a>
-  <a href="https://github.com/wnddd839/buddy-proxy/blob/main/LICENSE"><img src="https://img.shields.io/badge/License-BSD--3--Clause-1C1C1C?style=flat-square" alt="License" /></a>
+  <a href="https://github.com/LOX2018/buddy-proxy-V3/blob/main/LICENSE"><img src="https://img.shields.io/badge/License-BSD--3--Clause-1C1C1C?style=flat-square" alt="License" /></a>
   <a href="https://go.dev/"><img src="https://img.shields.io/badge/Go-%E2%89%A51.26-1C1C1C?style=flat-square&logo=go&logoColor=white" alt="Go" /></a>
   <img src="https://img.shields.io/badge/Transport-protocol__direct-1C1C1C?style=flat-square" alt="protocol_direct" />
 </p>
 
 <p align="center">
-  <a href="https://wnddd839.github.io/buddy-proxy/">产品页</a> ·
   <a href="#快速开始">快速开始</a> ·
   <a href="#接入客户端">接入</a> ·
   <a href="#文档">文档</a> ·
@@ -25,22 +23,9 @@
 
 ---
 
-感谢这些同学用 issue 把真实问题送上门，按编号：
-
-- [@dyed-fanxing](https://github.com/dyed-fanxing) · [#2](https://github.com/wnddd839/buddy-proxy/issues/2) ZCode 把 git status 写进上下文触发 11128 · [#4](https://github.com/wnddd839/buddy-proxy/issues/4) DeepSeek Flash 1M 上下文卡在约 70%
-- [@carter003](https://github.com/carter003) · [#6](https://github.com/wnddd839/buddy-proxy/issues/6) 换号重试按剩余账号缩小上限、提前终止 · [#8](https://github.com/wnddd839/buddy-proxy/issues/8) 同会话应钉在一个账号，新会话再按额度选号 · [#9](https://github.com/wnddd839/buddy-proxy/issues/9) 管理台版本号与请求 / token / credit 用量明细 · [#10](https://github.com/wnddd839/buddy-proxy/issues/10) 用量表账号字段与账号/模型筛选 · [#11](https://github.com/wnddd839/buddy-proxy/issues/11) hy3 缓存命中率接近 0（按模型对照，非统计算错）
-- [@tearslee](https://github.com/tearslee) · [#7](https://github.com/wnddd839/buddy-proxy/issues/7) 经代理走 DSH/Codex 时缓存读取一直是 0
-- [@240xu](https://github.com/240xu) · [#12](https://github.com/wnddd839/buddy-proxy/pull/12) IDE 模型目录与可对话模型对不上
-- [@zeonseoi](https://github.com/zeonseoi) · [#13](https://github.com/wnddd839/buddy-proxy/issues/13) Qoder CN 同类封装 · [#19](https://github.com/wnddd839/buddy-proxy/issues/19) 流式 Markdown 标题缺空格被当纯文本
-- [@itaid](https://github.com/itaid) · [#14](https://github.com/wnddd839/buddy-proxy/issues/14) Claude Code 的 system 指纹触发上游 11128
-- [@kouekikin24](https://github.com/kouekikin24) · [#15](https://github.com/wnddd839/buddy-proxy/issues/15) SITE 切换后旧会话钉号硬失败 · [#17](https://github.com/wnddd839/buddy-proxy/issues/17) 一个进程同时服务国内+国际 · [#18](https://github.com/wnddd839/buddy-proxy/issues/18) `/health` 是存活探针、上游挂了仍绿灯 · [#20](https://github.com/wnddd839/buddy-proxy/issues/20) `cn:` / `global:` 别名把同一模型拆成多份 · [#22](https://github.com/wnddd839/buddy-proxy/issues/22) 6004 冷却应对齐上游 reset · [#23](https://github.com/wnddd839/buddy-proxy/issues/23) 禁号/删号后钉会话 502 · [#24](https://github.com/wnddd839/buddy-proxy/issues/24) 管理台按当前号池过滤与多 Key · [#25](https://github.com/wnddd839/buddy-proxy/issues/25) 外部加号被整表回写抹掉
-- [@kkl31415926](https://github.com/kkl31415926) · [#16](https://github.com/wnddd839/buddy-proxy/issues/16) 流式 `tool_calls[].index` 缺失导致 Android Studio / OpenAI Java SDK 报错
-
----
-
 ## 一件事
 
-你有腾讯 CodeBuddy 或 WorkBuddy 账号。你有一堆只认 OpenAI `/v1` 格式的工具——NewAPI、ZCode、Sub2API、各类 SDK 和客户端。
+你有腾讯 CodeBuddy / WorkBuddy 账号。你有一堆只认 OpenAI `/v1` 格式的工具——NewAPI、ZCode、Sub2API、各类 SDK 和客户端。
 
 **Buddy Proxy 是中间那一层协议翻译器。**
 
@@ -51,7 +36,7 @@
 (OpenAI格式)     (协议翻译/账号池)     (protocol_direct)
 ```
 
-一个 Go 写的单文件二进制，跑在你自己的机器上。二进制名仍是 `codebuddy-proxy`。
+一个 Go 写的单文件二进制，跑在你自己的机器上。
 
 ---
 
@@ -65,9 +50,14 @@
 | **真实余额** | 管理台直读官网 Credits，显示「剩余 / 总额」 |
 | **国内 / 国际** | 同一进程可同时持有两区账号。默认区域可在管理台切换；单请求用 Key 绑定、`X-Site` 或 `cn:` / `global:` 前缀选区。**端点以账号自身区域为准** |
 | **CodeBuddy / WorkBuddy** | 一键切产品：CodeBuddy 走 CLI 头，WorkBuddy 走 IDE 头；模型目录随之切换 |
-| **模型列表** | 走协议 `/v3/config`，60 秒缓存，可强制刷新 |
+| **模型列表** | 走协议 `/v3/config`，60 秒缓存，可强制刷新；**按付费倍率排序**，无 `creditMultiplier` 的模型自动隐藏，仅有倍率模型参与展示 |
+| **模型白名单** | `~/.codebuddy/proxy-modelpolicy.json`，`allow` / `deny` 两级过滤，请求与目录同时生效，改文件即时热加载 |
+| **管理台重设计** | 章节式单页管理台：概览监控、账号池、用量明细、签到、模型目录、日志、设置，顶栏实时显示服务/上游/号码池/产品状态 |
+| **一键签到** | 管理台查看/刷新每账号签到状态，支持一键签到 |
+| **用量与明细** | 按账号 / 模型可筛选的用量表，Token 与 credit 明细透传，含缓存命中统计 |
+| **活动日志** | `~/.codebuddy/activity/activity.log`，JSONL 追加式，每日零点自动清空，只保留当天（超额自动轮转） |
 | **Token 用量透传** | 流式收尾补 usage chunk，含缓存命中统计（缓存字段兼容多上游别名） |
-| **开箱即用** | 预编译二进制，无运行时依赖；首次启动自动生成 API Key，默认写入 `~/.codebuddy/proxy.env` |
+| **Windows 托盘桌面版** | 系统托盘常驻，启动即自动打开管理台，可随时打开配置目录或退出 |
 
 ---
 
@@ -75,18 +65,19 @@
 
 ### 方式 A：下载即用（推荐）
 
-从 [GitHub Releases](https://github.com/wnddd839/buddy-proxy/releases/latest) 下载对应平台文件，直接运行。
+从 [GitHub Releases](https://github.com/LOX2018/buddy-proxy-V3/releases/latest) 下载对应平台文件，直接运行。
 
-| 系统 | 文件 |
+| 形态 | 文件 |
 |------|------|
-| **Windows 64 位** | `codebuddy-proxy-windows-x64.exe` |
+| **Windows 桌面托盘版（推荐）** | `CodeBuddy-桌面托盘版.exe` |
+| **Windows 64 位（控制台）** | `codebuddy-proxy-windows-x64.exe` |
 | Linux 64 位 | `codebuddy-proxy-linux-amd64` |
 | macOS Apple 芯片 | `codebuddy-proxy-darwin-arm64` |
 | macOS Intel | `codebuddy-proxy-darwin-amd64` |
 
 ```powershell
-# Windows
-.\codebuddy-proxy-windows-x64.exe
+# Windows 托盘版：双击即启动，托盘图标常驻，自动打开管理台
+.\CodeBuddy-桌面托盘版.exe
 ```
 
 ```bash
@@ -95,14 +86,15 @@ chmod +x ./codebuddy-proxy-linux-amd64
 ./codebuddy-proxy-linux-amd64
 ```
 
-首次启动会自动生成 API Key 并写入同目录 `.env`，日志里会打印出来。
+首次启动会自动生成 API Key 并写入 `~/.codebuddy/proxy.env`（/.env），日志里也会打印出来。
 
 ### 方式 B：从源码
 
 ```bash
-git clone https://github.com/wnddd839/buddy-proxy.git
-cd buddy-proxy
-go run ./cmd/codebuddy-proxy
+git clone https://github.com/LOX2018/buddy-proxy-V3.git
+cd buddy-proxy-V3
+go run ./cmd/codebuddy-proxy          # 控制台版
+go run ./cmd/codebuddy-proxy-gui      # Windows 托盘版
 ```
 
 ### 三个入口
@@ -142,7 +134,7 @@ curl http://127.0.0.1:32126/v1/chat/completions \
   -d '{"model":"auto","stream":true,"messages":[{"role":"user","content":"你好"}]}'
 ```
 
-模型 `id` 不带 `codebuddy/` 前缀，但请求时 `codebuddy/auto` 和 `auto` 都接受。
+模型 `id` 不带 `codebuddy/` 前缀，但请求时 `codebuddy/auto` 和 `auto` 都接受。`GET /v1/models` 只返回带付费倍率、且通过白名单的模型；倍率决定排序。
 
 > 只提供列表接口，**不支持** `GET /v1/models/{id}` 单模型查询（返回 404）。请在客户端侧从列表中匹配。
 
@@ -165,25 +157,49 @@ CODEBUDDY_PRODUCT=codebuddy      # 或 workbuddy
 
 ---
 
+## 模型白名单
+
+策略文件 `~/.codebuddy/proxy-modelpolicy.json`（可用环境变量 `CODEBUDDY_PROXY_MODELPOLICY_PATH` 指定路径）：
+
+```json
+{
+  "enabled": true,
+  "allow": ["hy3", "hy4-preview", "glm-5.3-flash"],
+  "deny":  ["glm-5.2"]
+}
+```
+
+规则（优先级：enabled > auto/default > deny > allow）：
+
+- `enabled: false` → 不限制
+- **deny 命中** → 拒绝该模型（目录隐藏、请求 4xx）
+- **allow 非空且未命中** → 拒绝，并提示当前白名单
+- `allow` 为空 → 仅 `deny` 生效
+- `auto` / `default` 始终放行
+
+文件改动即时生效（mtime 感知热加载），无需重启。批量过滤与单请求判定共用同一份策略。
+
+---
+
 ## 文档
 
 | 资源 | 链接 |
 | :--- | :--- |
-| 产品页 | [wnddd839.github.io/buddy-proxy](https://wnddd839.github.io/buddy-proxy/) |
 | 文档索引 | [`docs/README.md`](docs/README.md) |
 | 快速开始 | [`guides/getting-started.md`](docs/guides/getting-started.md) |
 | 配置参考 | [`guides/configuration.md`](docs/guides/configuration.md) |
 | HTTP API | [`api/http.md`](docs/api/http.md) |
 | 架构说明 | [`architecture/overview.md`](docs/architecture/overview.md) |
 | 运维排障 | [`operations/runbook.md`](docs/operations/runbook.md) |
-| 预编译包 | [GitHub Releases](https://github.com/wnddd839/buddy-proxy/releases/latest) |
+| 预编译包 | [GitHub Releases](https://github.com/LOX2018/buddy-proxy-V3/releases/latest) |
 | 更新日记 | [`CHANGELOG.md`](CHANGELOG.md) · [安全说明](SECURITY.md) |
 
 开发命令（仓库根目录）：
 
 ```bash
 make test      # go test ./...
-make build     # 产出 bin/
+make build     # 产出 bin/codebuddy-proxy
+make build-gui # 产出 bin/codebuddy-proxy-gui.exe（Windows 托盘版）
 make release   # 四平台交叉编译 + SHA256SUMS.txt
 ```
 
@@ -235,8 +251,6 @@ make release   # 四平台交叉编译 + SHA256SUMS.txt
 ## License
 
 [BSD-3-Clause](LICENSE) · 开源分享，不含任何担保与责任。
-
-灵感与参考：[CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) · [Kiro-Go](https://github.com/Quorinex/Kiro-Go) · NewAPI 生态
 
 ---
 
