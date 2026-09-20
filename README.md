@@ -23,6 +23,18 @@
 
 ---
 
+感谢这些同学用 issue 把真实问题送上门，按编号：
+
+- [@dyed-fanxing](https://github.com/dyed-fanxing) · [#2](https://github.com/wnddd839/buddy-proxy/issues/2) ZCode 把 git status 写进上下文触发 11128 · [#4](https://github.com/wnddd839/buddy-proxy/issues/4) DeepSeek Flash 1M 上下文卡在约 70%
+- [@carter003](https://github.com/carter003) · [#6](https://github.com/wnddd839/buddy-proxy/issues/6) 换号重试按剩余账号缩小上限、提前终止 · [#8](https://github.com/wnddd839/buddy-proxy/issues/8) 同会话应钉在一个账号，新会话再按额度选号 · [#9](https://github.com/wnddd839/buddy-proxy/issues/9) 管理台版本号与请求 / token / credit 用量明细 · [#10](https://github.com/wnddd839/buddy-proxy/issues/10) 用量表账号字段与账号/模型筛选 · [#11](https://github.com/wnddd839/buddy-proxy/issues/11) hy3 缓存命中率接近 0（按模型对照，非统计算错） · [#27](https://github.com/wnddd839/buddy-proxy/pull/27) 同会话应复用上游 `X-Conversation-ID`
+- [@tearslee](https://github.com/tearslee) · [#7](https://github.com/wnddd839/buddy-proxy/issues/7) 经代理走 DSH/Codex 时缓存读取一直是 0
+- [@240xu](https://github.com/240xu) · [#12](https://github.com/wnddd839/buddy-proxy/pull/12) IDE 模型目录与可对话模型对不上
+- [@zeonseoi](https://github.com/zeonseoi) · [#13](https://github.com/wnddd839/buddy-proxy/issues/13) Qoder CN 同类封装 · [#19](https://github.com/wnddd839/buddy-proxy/issues/19) 流式 Markdown 标题缺空格被当纯文本
+- [@itaid](https://github.com/itaid) · [#14](https://github.com/wnddd839/buddy-proxy/issues/14) Claude Code 的 system 指纹触发上游 11128
+- [@kouekikin24](https://github.com/kouekikin24) · [#15](https://github.com/wnddd839/buddy-proxy/issues/15) SITE 切换后旧会话钉号硬失败 · [#17](https://github.com/wnddd839/buddy-proxy/issues/17) 一个进程同时服务国内+国际 · [#18](https://github.com/wnddd839/buddy-proxy/issues/18) `/health` 是存活探针、上游挂了仍绿灯 · [#20](https://github.com/wnddd839/buddy-proxy/issues/20) `cn:` / `global:` 别名把同一模型拆成多份 · [#22](https://github.com/wnddd839/buddy-proxy/issues/22) 6004 冷却应对齐上游 reset · [#23](https://github.com/wnddd839/buddy-proxy/issues/23) 禁号/删号后钉会话 502 · [#24](https://github.com/wnddd839/buddy-proxy/issues/24) 管理台按当前号池过滤与多 Key · [#25](https://github.com/wnddd839/buddy-proxy/issues/25) 外部加号被整表回写抹掉
+- [@kkl31415926](https://github.com/kkl31415926) · [#16](https://github.com/wnddd839/buddy-proxy/issues/16) 流式 `tool_calls[].index` 缺失导致 Android Studio / OpenAI Java SDK 报错
+
+---
 ## 一件事
 
 你有腾讯 CodeBuddy / WorkBuddy 账号。你有一堆只认 OpenAI `/v1` 格式的工具——NewAPI、ZCode、Sub2API、各类 SDK 和客户端。
@@ -45,7 +57,7 @@
 | 能力 | 说明 |
 | :--- | :--- |
 | **协议直连** | OAuth 登录后直连上游，不依赖 `codebuddy --serve` 等本地中间进程 |
-| **标准 OpenAI 形状** | `GET /v1/models` · `POST /v1/chat/completions`，流式与非流式都支持 |
+| **标准 OpenAI 形状** | `GET /v1/models` · `POST /v1/chat/completions` · `POST /v1/responses`（Responses API，Codex CLI 可直连），流式与非流式都支持 |
 | **多账号调度** | 同会话钉在同一账号；钉号被禁用/删除会换号。新会话按额度快照选最大（缺快照或超过 5 分钟才探活）；失败换号前再探活拿最大。6004 按错误文案 `will reset at` 长冷却。凭据以 `0600` 权限落盘 |
 | **真实余额** | 管理台直读官网 Credits，显示「剩余 / 总额」 |
 | **国内 / 国际** | 同一进程可同时持有两区账号。默认区域可在管理台切换；单请求用 Key 绑定、`X-Site` 或 `cn:` / `global:` 前缀选区。**端点以账号自身区域为准** |
@@ -137,6 +149,29 @@ curl http://127.0.0.1:32126/v1/chat/completions \
 模型 `id` 不带 `codebuddy/` 前缀，但请求时 `codebuddy/auto` 和 `auto` 都接受。`GET /v1/models` 只返回带付费倍率、且通过白名单的模型；倍率决定排序。
 
 > 只提供列表接口，**不支持** `GET /v1/models/{id}` 单模型查询（返回 404）。请在客户端侧从列表中匹配。
+
+### Codex CLI 接入（Responses API）
+
+`POST /v1/responses` 已按 OpenAI Responses API 实现（协议翻译到上游号池），Codex CLI 可直连：
+
+```bash
+# ~/.codex/config.toml
+model_provider = "buddy-proxy"
+model = "auto"
+
+[model_providers.buddy-proxy]
+name = "Buddy Proxy"
+base_url = "http://127.0.0.1:32126/v1"
+env_key = "CODEBUDDY_PROXY_API_KEY"
+wire_api = "responses"
+```
+
+```bash
+export CODEBUDDY_PROXY_API_KEY=cbp_xxx
+codex "帮我看看这个仓库的结构"
+```
+
+支持 `input` item 数组 / `instructions` / function 工具调用 / `reasoning.effort`；流式为命名 SSE 事件（`response.output_text.delta` 等）。`background`、服务端存储（`store` / `previous_response_id`）与内置工具（`web_search` 等）不支持，详见 [HTTP API](docs/api/http.md)。
 
 国内 / 国际、CodeBuddy / WorkBuddy 切换只需改 `.env`（或在管理台点切换）：
 

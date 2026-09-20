@@ -107,6 +107,8 @@ type Service struct {
 	modelsCache   map[string]modelsCacheEntry
 	modelsFlight  modelsFlight
 	Pins          *sessionpin.Table
+	// Conversations 让钉住的会话在账号不变时复用上游 X-Conversation-ID。
+	Conversations *sessionpin.ConversationTable
 	Journal       *usagejournal.Journal
 	ModelPolicy   *modelpolicy.Manager
 	// OnActivity 供上层接口把网关侧业务事件写入活动日志（例如自动换号）。
@@ -135,16 +137,17 @@ func New(cfg config.Config, logger *slog.Logger) *Service {
 		logger.Info("usage journal persistence enabled", "path", cfg.UsagePath)
 	}
 	svc := &Service{
-		Pool:        accounts.NewPool(cfg.AccountsPath),
-		Provider:    p,
-		OAuth:       oauth.NewClient(p.HTTP),
-		Models:      models.NewLister(),
-		Log:         logger,
-		Started:     time.Now(),
-		oauth:       &OAuthSession{Status: "idle"},
-		Pins:        sessionpin.New(0),
-		Journal:     journal,
-		ModelPolicy: modelpolicy.New(),
+		Pool:          accounts.NewPool(cfg.AccountsPath),
+		Provider:      p,
+		OAuth:         oauth.NewClient(p.HTTP),
+		Models:        models.NewLister(),
+		Log:           logger,
+		Started:       time.Now(),
+		oauth:         &OAuthSession{Status: "idle"},
+		Pins:          sessionpin.New(0),
+		Conversations: sessionpin.NewConversationTable(0),
+		Journal:       journal,
+		ModelPolicy:   modelpolicy.New(),
 	}
 	svc.modelsCache = map[string]modelsCacheEntry{}
 	svc.probeCache = map[string]provider.Reachability{}
@@ -385,6 +388,10 @@ func (s *Service) CompleteFromPool(ctx context.Context, opts CompleteOptions) (C
 		s.Log.Debug("pool select bypassed cooldown (all accounts cooling)", "accountId", account.ID, "cooldownUntil", account.CooldownUntil)
 	}
 	chatOpts := s.chatOptionsFromAccount(account, opts)
+	// 同会话复用上游会话 ID；仅在有账号钉（pinKey 非空）时注入，与钉号生命周期一致。
+	if pinKey != "" {
+		chatOpts.ConversationID = s.Conversations.ID(pinKey+"\x1e"+chatOpts.Product, account.ID)
+	}
 	result, err := s.Provider.Complete(ctx, chatOpts)
 	if err != nil {
 		// 客户端主动断开 SSE/HTTP，不算账号或上游故障。
@@ -745,6 +752,96 @@ func (s *Service) refreshCandidateQuotas(ctx context.Context, exclude []string, 
 		"staleOnly", staleOnly,
 		"elapsed", time.Since(started).String(),
 	)
+}
+
+const adminUsageRefreshTimeout = 15 * time.Second
+
+// PoolUsageItem 是管理台「刷新状态」拉回来的单账号上游额度。
+type PoolUsageItem struct {
+	OK               bool               `json:"ok"`
+	AccountID        string             `json:"accountId"`
+	Site             string             `json:"site,omitempty"`
+	Credits          billing.Credits    `json:"credits,omitzero"`
+	Notify           *billing.Notify    `json:"notify,omitzero"`
+	OfficialUsageURL string             `json:"officialUsageUrl,omitempty"`
+	Note             string             `json:"note,omitempty"`
+	Quota            billing.QuotaState `json:"quota,omitzero"`
+	Error            string             `json:"error,omitzero"`
+}
+
+// RefreshPoolUsage 对当前号池已启用且有凭据的账号并行打上游套餐接口，
+// 写入 QuotaState。冷却中 / 配额耗尽的号也会打，方便页面看到是否已恢复。
+// 15 秒自动轮询不要走这里。
+func (s *Service) RefreshPoolUsage(ctx context.Context, site string) []PoolUsageItem {
+	if s == nil || s.Pool == nil || s.Provider == nil {
+		return nil
+	}
+	accounts := s.listPoolAccountsForUsage(site)
+	if len(accounts) == 0 {
+		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(ctx, adminUsageRefreshTimeout)
+	defer cancel()
+	started := time.Now()
+	items := make([]PoolUsageItem, len(accounts))
+	var wg sync.WaitGroup
+	var refreshed atomic.Int32
+	for i, account := range accounts {
+		wg.Go(func() {
+			usage, err := billing.FetchAccountUsage(ctx, s.Provider, account, s.Config())
+			if err != nil {
+				items[i] = PoolUsageItem{AccountID: account.ID, Site: account.Site, Error: err.Error()}
+				return
+			}
+			state := billing.QuotaStateFromUsage(usage, time.Now())
+			if _, applyErr := s.Pool.ApplyQuotaState(account.ID, state.Remaining, state.Unlimited, state.ResetAt, state.CheckedAt); applyErr != nil {
+				s.Log.Debug("admin quota apply failed", "accountId", account.ID, "error", applyErr.Error())
+			}
+			items[i] = PoolUsageItem{
+				OK:               usage.OK,
+				AccountID:        account.ID,
+				Site:             usage.Site,
+				Credits:          usage.Credits,
+				Notify:           usage.Notify,
+				OfficialUsageURL: usage.OfficialUsageURL,
+				Note:             usage.Note,
+				Quota:            state,
+			}
+			refreshed.Add(1)
+		})
+	}
+	wg.Wait()
+	s.Log.Info("refreshed pool usage from upstream",
+		"accounts", len(accounts),
+		"updated", refreshed.Load(),
+		"elapsed", time.Since(started).String(),
+	)
+	return items
+}
+
+func (s *Service) listPoolAccountsForUsage(site string) []accounts.Account {
+	if s == nil || s.Pool == nil {
+		return nil
+	}
+	store, err := s.Pool.Read()
+	if err != nil {
+		return nil
+	}
+	site = config.NormalizeSite(strutil.First(site, s.ActivePoolSite()))
+	out := make([]accounts.Account, 0, len(store.Accounts))
+	for _, account := range store.Accounts {
+		if !account.Enabled || !accounts.HasCredentials(account) {
+			continue
+		}
+		if site != "" && config.NormalizeSite(account.Site) != site {
+			continue
+		}
+		out = append(out, account)
+	}
+	return out
 }
 
 func (s *Service) ListModels(ctx context.Context, fresh bool) (models.ListResult, error) {
