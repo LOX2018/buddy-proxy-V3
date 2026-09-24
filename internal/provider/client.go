@@ -577,7 +577,9 @@ func EnsureUpstreamMessages(messages []map[string]any) []map[string]any {
 		role := NormalizeMessageRole(fmt.Sprint(message["role"]))
 		item := map[string]any{"role": role}
 		if toolCalls, ok := message["tool_calls"]; ok {
-			item["tool_calls"] = toolCalls
+			if normalized := asAnySlice(toolCalls); len(normalized) > 0 {
+				item["tool_calls"] = normalized
+			}
 		}
 		if id, ok := message["tool_call_id"]; ok {
 			item["tool_call_id"] = id
@@ -586,18 +588,8 @@ func EnsureUpstreamMessages(messages []map[string]any) []map[string]any {
 			item["name"] = name
 		}
 		item["content"] = flattenContent(message["content"])
-		hasToolCalls := false
-		if tc, ok := item["tool_calls"].([]any); ok && len(tc) > 0 {
-			hasToolCalls = true
-		}
-		contentEmpty := false
-		switch v := item["content"].(type) {
-		case string:
-			contentEmpty = strings.TrimSpace(v) == ""
-		case nil:
-			contentEmpty = true
-		}
-		if contentEmpty && !hasToolCalls && item["tool_call_id"] == nil {
+		hasToolCalls := len(asAnySlice(item["tool_calls"])) > 0
+		if messageContentEmpty(item["content"]) && !hasToolCalls && item["tool_call_id"] == nil {
 			continue
 		}
 		if role == "system" {
@@ -608,12 +600,48 @@ func EnsureUpstreamMessages(messages []map[string]any) []map[string]any {
 		}
 		rest = append(rest, item)
 	}
+	rest = mergeConsecutiveToolAssistants(rest)
 	if len(instructions) == 0 {
 		return rest
 	}
 	out := make([]map[string]any, 0, len(rest)+2)
 	out = append(out, map[string]any{"role": "system", "content": canonicalUpstreamSystem})
 	out = append(out, foldClientInstructions(rest, strings.Join(instructions, "\n\n"))...)
+	return out
+}
+
+func messageContentEmpty(content any) bool {
+	switch v := content.(type) {
+	case nil:
+		return true
+	case string:
+		return strings.TrimSpace(v) == ""
+	default:
+		return false
+	}
+}
+
+func isEmptyToolAssistant(msg map[string]any) bool {
+	return fmt.Sprint(msg["role"]) == "assistant" &&
+		messageContentEmpty(msg["content"]) &&
+		len(asAnySlice(msg["tool_calls"])) > 0
+}
+
+// mergeConsecutiveToolAssistants 把连续的空正文 assistant.tool_calls 合成一条。
+// flash 系上游拒收「多条空 assistant + 后置集中 tool」（11148）；交错 A/T 与带正文的 assistant 不动。
+func mergeConsecutiveToolAssistants(msgs []map[string]any) []map[string]any {
+	if len(msgs) < 2 {
+		return msgs
+	}
+	out := make([]map[string]any, 0, len(msgs))
+	for _, msg := range msgs {
+		if len(out) > 0 && isEmptyToolAssistant(out[len(out)-1]) && isEmptyToolAssistant(msg) {
+			prev := out[len(out)-1]
+			prev["tool_calls"] = append(asAnySlice(prev["tool_calls"]), asAnySlice(msg["tool_calls"])...)
+			continue
+		}
+		out = append(out, msg)
+	}
 	return out
 }
 
@@ -838,7 +866,7 @@ func DescribeUpstreamBody(body map[string]any) map[string]any {
 		default:
 			detail["contentKind"] = fmt.Sprintf("%T", content)
 		}
-		if tc, ok := msg["tool_calls"].([]any); ok && len(tc) > 0 {
+		if tc := asAnySlice(msg["tool_calls"]); len(tc) > 0 {
 			detail["toolCallsCount"] = len(tc)
 			detail["toolCallNames"] = toolNames(tc)
 		}
@@ -874,12 +902,24 @@ func toMessageList(messages any) []map[string]any {
 	}
 }
 
-// toolNames 提取 tools / tool_calls 中的 function 名（只记名，不记参数）。
-func toolNames(items any) []string {
-	arr, ok := items.([]any)
-	if !ok {
+func asAnySlice(v any) []any {
+	switch x := v.(type) {
+	case []any:
+		return x
+	case []map[string]any:
+		out := make([]any, len(x))
+		for i, m := range x {
+			out[i] = m
+		}
+		return out
+	default:
 		return nil
 	}
+}
+
+// toolNames 提取 tools / tool_calls 中的 function 名（只记名，不记参数）。
+func toolNames(items any) []string {
+	arr := asAnySlice(items)
 	names := make([]string, 0, len(arr))
 	for _, raw := range arr {
 		m, ok := raw.(map[string]any)

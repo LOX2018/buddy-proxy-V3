@@ -9,6 +9,105 @@
 
 ---
 
+## v0.5.4 · 2026-09-23 · 国际站账号测试不再误报 11128 · 断电不再把账号文件写成全 0
+
+### 感谢
+
+- [@kouekikin24](https://github.com/kouekikin24) 在 [#31](https://github.com/wnddd839/buddy-proxy/pull/31) 指出管理台国际站「测试」对健康账号恒报 `11128 first message is not system prompt`。
+- [@kouekikin24](https://github.com/kouekikin24) 在 [#32](https://github.com/wnddd839/buddy-proxy/pull/32) 用一次非正常关机证明：NTFS 上 temp+rename 未 fsync 时，账号池和用量文件会留下正确长度、内容全 0x00。
+
+### 解决了什么
+
+1. v0.5.2 的账号 Chat 测试只发一条 `user: ping`。国际站要求首条为 system，健康号会被判失败，同时段生产流量却正常。国内站不受影响。
+2. 账号池、用量、`.env` 三处 `WriteFile(tmp)` → `Rename` 在 rename 前不刷盘。断电窗口内目录项和长度已提交、数据还在写缓存，恢复后文件全 0，看起来像「池里本来没号」。
+
+### 改了什么
+
+- `TestAccountChat` 先发一条非空 system，再发 `ping`。`EnsureUpstreamMessages` 因此补上 canonical system 槽，探测不再误踩 11128。仍钉死目标账号，不写 cooldown / 选号。
+- 新增 `internal/atomicwrite.Write`：temp + write + chmod + Sync + close + rename。三处持久化都走它。失败清临时文件、保留原文件。
+
+### 升级注意
+
+覆盖旧二进制后重启。账号池不用迁移。已损坏的全 0 文件救不回来，需要从备份或重新登录恢复。
+
+下载：https://github.com/wnddd839/buddy-proxy/releases/tag/v0.5.4
+
+---
+
+## v0.5.3 · 2026-09-23 · flash 11148 合并分散 tool_calls · 顶栏不再逐字折行
+
+### 感谢
+
+- [@carter003](https://github.com/carter003) 在 [#30](https://github.com/wnddd839/buddy-proxy/issues/30) 用对照矩阵证伪：flash 系拒收连续分散的空 `assistant.tool_calls` + 后置集中 `tool` 结果（11148），合并成一条即过。
+- [@kouekikin24](https://github.com/kouekikin24) 在 [#33](https://github.com/wnddd839/buddy-proxy/issues/33) 指出切号池后探测文案变长，顶栏每个标签内部逐字折行。
+
+### 解决了什么
+
+1. `deepseek-v4.1-flash` / `deepseek-v4-flash` 在「两条空 assistant 各带 1 个 tool_call + 后置集中 tool 结果」时稳定 11148；同请求换 hy4/auto/glm 则过。v0.5.1 的类型归一挡不住这个形状。
+2. 切国内/国际号池后几秒，探测文案变长，顶栏 5 个标签各自内部折行，中文逐字断开。
+
+### 改了什么
+
+- `EnsureUpstreamMessages` 合并**连续的空正文** `assistant.tool_calls`（T2/T7 → T1）。已交错的 A/T（T4）和带正文的 assistant 不合并。孤儿 `tool`（T5）仍透传。
+- 管理台顶栏 `.pill` / `.pillrow` 禁止内部折行、禁止被压窄；过宽时整条状态条换到品牌下一行。UI 修订号改为 `2026.09.23-status-pills`。
+
+### 升级注意
+
+覆盖旧二进制后重启。账号池不用迁移。管理台顶栏版本旁应看到 `ui 2026.09.23-status-pills`。
+
+下载：https://github.com/wnddd839/buddy-proxy/releases/tag/v0.5.3
+
+---
+
+## v0.5.2 · 2026-09-22 · 账号 Chat 测试
+
+### 感谢
+
+- [@kouekikin24](https://github.com/kouekikin24) 在 [#29](https://github.com/wnddd839/buddy-proxy/issues/29) 建议管理台对齐 New API 渠道测试：钉死账号发一条最小 chat，看可用性与延迟。
+
+### 解决了什么
+
+管理台账号池只能启用、禁用、查用量、刷新令牌、删除，没有办法单独验证某个账号能不能聊天。
+
+### 改了什么
+
+- 单账号 `POST /direct-admin/api/codebuddy/accounts/{id}/test`，批量 `POST /direct-admin/api/codebuddy/test`（与 checkin 同级，避免被 `accounts/{id}` 吞掉）。
+- 钉死目标账号后直接 `Provider.Complete`，不走换号，不写 cooldown / 选号。默认模型取缓存目录最低倍率，可在 body 里覆盖 `model`。
+- 批量串行，间隔 350ms；单账号 20s，批次上限 5 分钟。只读探测不会先刷新过期 token，401 时先点「刷新 Token」。
+- 错误摘要按 rune 截断，中文不再在 UTF-8 边界被切成乱码。
+- 管理台账号行「测试」、顶部「批量测试」和共享模型下拉。顶栏版本旁显示 UI 修订号 `2026.09.22-chat-test`。
+
+### 升级注意
+
+覆盖旧二进制后重启。账号池不用迁移。
+
+下载：https://github.com/wnddd839/buddy-proxy/releases/tag/v0.5.2
+
+---
+
+## v0.5.1 · 2026-09-21 · Responses 工具回传配对 11148
+
+### 感谢
+
+- [@carter003](https://github.com/carter003) 在 [#28](https://github.com/wnddd839/buddy-proxy/issues/28) 指出 Responses 回传工具结果时 `tool_calls` 的 Go 切片类型对不上过滤逻辑，上游打回 11148。
+
+### 解决了什么
+
+Codex 等客户端走 `POST /v1/responses`，第二轮把 `function_call` + `function_call_output` 再塞进 `input`。翻译层把 `tool_calls` 写成 `[]map[string]any`，上游过滤只认 `[]any`，assistant 被当空消息丢掉，只剩 `tool` 结果，上游回 `11148 tool calls and tool results do not match`。
+
+### 改了什么
+
+- `EnsureUpstreamMessages` 把 `tool_calls` 的 `[]map[string]any` 与 `[]any` 归一后再判断是否为空消息。Responses 第二轮的 `assistant.tool_calls` 不再被丢掉，工具结果能和调用配对。
+- 日志指纹同样走归一函数。附 `ToMessages` → `EnsureUpstreamMessages` 回归测试。
+
+### 升级注意
+
+覆盖旧二进制后重启。账号池不用迁移。v0.5 的 Codex 配置不用改。
+
+下载：https://github.com/wnddd839/buddy-proxy/releases/tag/v0.5.1
+
+---
+
 ## v0.5 · 2026-09-20 · Responses API · 同会话复用上游会话 ID
 
 ### 感谢

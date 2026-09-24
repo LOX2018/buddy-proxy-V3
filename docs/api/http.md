@@ -149,7 +149,7 @@ OpenAI **Responses API** 协议翻译层，主要面向 Codex CLI 等以 `/v1/re
 
 **已支持：**
 
-- `input`（字符串或 item 数组：`message` / `function_call` / `function_call_output`；`reasoning` item 接收但不回放）、`instructions`（→ system 消息）、`developer` role（→ `system`）
+- `input`（字符串或 item 数组：`message` / `function_call` / `function_call_output`；`reasoning` item 接收但不回放）、`instructions`（→ system 消息）、`developer` role（→ `system`）。历史 `function_call` / `function_call_output` 译成 chat 的 `assistant.tool_calls` + `tool`，与上游配对。
 - `tools`（Responses 扁平形态 `{type:"function", name, parameters}` 与 chat 嵌套形态均可）、`tool_choice`（`auto`/`none`/`required`/`{type:"function",name}`）
 - `reasoning.effort`、`max_output_tokens`、`temperature`、`top_p`、`prompt_cache_key`（→ 会话钉号；同会话同时复用上游 `X-Conversation-ID`）
 - 非流式：返回完整 `response` 对象（`output[]` 含 `reasoning` / `message` / `function_call` item + `usage`）
@@ -199,7 +199,7 @@ JSON 请求体上限 **64MiB**（`httputil.MaxJSONBodyBytes`）。超过时返�
 {"error":{"message":"Request body exceeds 64MB. 1M-context requests need a larger JSON body.","type":"invalid_request_error"}}
 ```
 
-非法 JSON 仍为 `400` `Invalid JSON body`。
+非法 JSON 仍为 `400` `Invalid JSON body`。出站前会把**连续的空正文** `assistant.tool_calls` 合成一条（flash 系上游拒收分散形状，11148）；已交错的 A/T 与带正文的 assistant 不合并。
 
 **流式行为**：
 
@@ -284,7 +284,35 @@ usage chunk 形如：
 | POST | `/direct-admin/api/codebuddy/accounts/{id}/disable` | 禁用 |
 | GET | `/direct-admin/api/codebuddy/accounts/{id}/usage` | 拉取该账号 Credits（剩余/总额） |
 | POST | `/direct-admin/api/codebuddy/accounts/{id}/refresh-token` | 强制刷新 token |
+| POST | `/direct-admin/api/codebuddy/accounts/{id}/test` | 钉死该账号发最小 chat，验证可用性与延迟；body 可选 `{"model":"..."}`，省略时取缓存目录最低倍率模型 |
 | POST | `/direct-admin/api/codebuddy/checkin` | 对指定号池内已启用账号批量每日签到；body 可选 `{"site":"domestic"}`，省略时跟随当前激活号池（`CODEBUDDY_SITE`） |
+| POST | `/direct-admin/api/codebuddy/test` | 对指定号池内已启用账号批量 chat 测试（串行 + 小间隔）；body 可选 `{"site":"...","model":"..."}`，路径与 `checkin` 同级以免被 `accounts/{id}` 吞掉 |
+
+`accounts/{id}/test` 与 `test` 均为只读探测：不写 cooldown / 选号 / session pin，失败也不会换号，也不会在测试前刷新过期 token。401 时先点「刷新 Token」再测，避免把过期登录态误判成账号不可用。最小 chat 带一条非空 system 再发 `user: ping`，避免国际站因「首条不是 system」打回 11128 而把健康号判失败。上游仍走 protocol_direct 流式聚合；管理台拿到的是 JSON。单账号超时 20s；批次总上限 5 分钟（约 `20s × 账号数`），间隔默认 350ms。模型目录缓存为空且未传 `model` 时整批失败，先点「拉取模型」。
+
+`test` 批量响应示例：
+
+```json
+{
+  "ok": true,
+  "poolSite": "domestic",
+  "model": "hy4-preview",
+  "summary": {
+    "total": 2,
+    "passed": 2
+  },
+  "results": [
+    {
+      "ok": true,
+      "accountId": "…",
+      "site": "domestic",
+      "model": "hy4-preview",
+      "latencyMs": 812,
+      "message": "chat ok"
+    }
+  ]
+}
+```
 
 `checkin` 响应示例：
 
