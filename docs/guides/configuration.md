@@ -24,6 +24,14 @@
 | `CODEBUDDY_PROXY_PORT` | `32126` | 监听端口 |
 | `CODEBUDDY_PROXY_PUBLIC_BASE_URL` | 空 | 公网访问地址，用于 OAuth 回调与客户端配置回显。会去掉结尾 `/` |
 
+## 上游出网
+
+| 变量 | 默认值 | 说明 |
+|------|--------|------|
+| `CODEBUDDY_PROXY_UPSTREAM_PROXY` | 空 | 上游主机（`www.codebuddy.cn` / `www.codebuddy.ai` / `www.workbuddy.cn` / `www.workbuddy.ai` / `copilot.tencent.com`）走哪把代理。**留空 = 这些主机直连**，不跟随环境里的 `HTTP_PROXY` / `HTTPS_PROXY`。只有你的网络必须经代理才连得上 CodeBuddy 时才设，例如 `http://127.0.0.1:10808`。第三方出站（GitHub 版本检查）始终跟随环境代理 |
+
+环境里配了通用代理（通常是给 GitHub 这类境外站点用的）时，国际站 `www.codebuddy.ai` 经该代理容易出现 `TLS handshake timeout`，登录、刷新 token、Credits、模型目录、对话会一起失败；国内站两条路都通，所以只有国际站中枪。默认直连就是为了避开这个。
+
 ## 鉴权
 
 | 变量 | 默认值 | 说明 |

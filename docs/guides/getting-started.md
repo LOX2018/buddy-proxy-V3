@@ -47,6 +47,10 @@ Health   http://127.0.0.1:32126/health
 2. 若设置了 `CODEBUDDY_PROXY_ADMIN_PASSWORD`，用 Basic Auth 登录（用户名 `admin`）
 3. 选择国内 / 国际、CodeBuddy / WorkBuddy，点「开始 OAuth」
 4. 在浏览器完成授权，回到管理台点「检查登录」
+   - 国际站会由服务端用 **Edge 无痕窗口**打开登录页（Edge 缺失时退回 Chrome `--incognito`），
+     避免复用浏览器里已登录的账号。
+   - 号池按「身份 + 站点」判重：用同一个账号再授权一次只会刷新那一行，不会新增条目。
+     想加第二个国际站账号，必须在无痕窗口里登录另一个邮箱。
 5. 账号写入 `CODEBUDDY_PROXY_ACCOUNTS_PATH`
 
 ## 接入客户端

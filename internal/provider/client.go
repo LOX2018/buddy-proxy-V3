@@ -11,11 +11,13 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/wnddd839/codebuddy-proxy/internal/config"
+	"github.com/wnddd839/codebuddy-proxy/internal/httputil"
 	"github.com/wnddd839/codebuddy-proxy/internal/strutil"
 )
 
@@ -35,7 +37,7 @@ func NewClient(cfg config.Config) *Client {
 		headerTimeout = 180 * time.Second
 	}
 	transport := &http.Transport{
-		Proxy: http.ProxyFromEnvironment,
+		Proxy: upstreamProxyFunc(cfg),
 		DialContext: (&net.Dialer{
 			Timeout:   30 * time.Second,
 			KeepAlive: 30 * time.Second,
@@ -50,11 +52,40 @@ func NewClient(cfg config.Config) *Client {
 	}
 	return &Client{
 		HTTP: &http.Client{
-			Timeout:   0,
-			Transport: transport,
+			Timeout:       0,
+			Transport:     transport,
+			CheckRedirect: httputil.SameOriginRedirectPolicy,
 		},
 		IDEVersion: strutil.First(cfg.IDEVersion, config.DefaultIDEVersion),
 		Log:        slog.Default(),
+	}
+}
+
+// upstreamProxyFunc 决定上游请求走哪条代理。机器上的 HTTP(S)_PROXY 一般是给
+// GitHub 这类境外站点准备的，用它连 CodeBuddy 国际站会 TLS 握手超时；所以产品
+// 自身主机默认直连，需要代理时用 CODEBUDDY_PROXY_UPSTREAM_PROXY 显式指定。
+// 其余主机（第三方）仍跟随环境代理。
+func upstreamProxyFunc(cfg config.Config) func(*http.Request) (*url.URL, error) {
+	var explicit *url.URL
+	if raw := strings.TrimSpace(cfg.UpstreamProxy); raw != "" {
+		parsed, err := url.Parse(raw)
+		if err != nil || parsed.Host == "" {
+			return http.ProxyFromEnvironment
+		}
+		explicit = parsed
+	}
+	direct := make(map[string]bool)
+	for _, host := range config.UpstreamHosts() {
+		direct[strings.ToLower(host)] = true
+	}
+	return func(req *http.Request) (*url.URL, error) {
+		if explicit != nil {
+			return explicit, nil
+		}
+		if direct[strings.ToLower(req.URL.Hostname())] {
+			return nil, nil
+		}
+		return http.ProxyFromEnvironment(req)
 	}
 }
 
