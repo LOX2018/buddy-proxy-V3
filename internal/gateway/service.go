@@ -20,6 +20,7 @@ import (
 	"github.com/wnddd839/codebuddy-proxy/internal/modelpolicy"
 	"github.com/wnddd839/codebuddy-proxy/internal/models"
 	"github.com/wnddd839/codebuddy-proxy/internal/oauth"
+	"github.com/wnddd839/codebuddy-proxy/internal/openprivate"
 	"github.com/wnddd839/codebuddy-proxy/internal/provider"
 	"github.com/wnddd839/codebuddy-proxy/internal/sessionpin"
 	"github.com/wnddd839/codebuddy-proxy/internal/strutil"
@@ -84,6 +85,8 @@ type OAuthSession struct {
 	AccessURL   string `json:"accessUrl"`
 	CallbackURL string `json:"callbackUrl"`
 	Error       string `json:"error"`
+	OpenBrowser string `json:"openBrowser,omitempty"`
+	OpenError   string `json:"openError,omitempty"`
 	StartedAt   int64  `json:"startedAt"`
 	UpdatedAt   int64  `json:"updatedAt"`
 	ConfirmedAt int64  `json:"confirmedAt,omitempty"`
@@ -1316,6 +1319,15 @@ func (s *Service) StartOAuth(ctx context.Context, site, label, publicOrigin stri
 	s.oauth.Status = "waiting"
 	s.oauth.Error = ""
 	s.oauth.UpdatedAt = time.Now().UnixMilli()
+	// 国际站授权强制无痕窗口：普通窗口会复用浏览器里已登录的 CodeBuddy 会话，
+	// 结果"再授权一个账号"实际是同一个账号授权第二次，号池按身份判重后不会新增。
+	if sessionSite == "global" {
+		browser, openErr := openprivate.OpenInPrivateWindow(started.AuthURL)
+		s.oauth.OpenBrowser = browser
+		if openErr != nil {
+			s.oauth.OpenError = openErr.Error()
+		}
+	}
 	return s.oauthPayloadLocked(publicOrigin), nil
 }
 
@@ -1423,7 +1435,14 @@ func (s *Service) oauthPayloadLocked(publicOrigin string) map[string]any {
 func oauthMessage(session OAuthSession) string {
 	switch session.Status {
 	case "waiting":
-		return "请在打开的 CodeBuddy 页面完成登录，然后回到管理台点击「检查登录」或等待自动轮询。"
+		switch {
+		case session.OpenBrowser != "":
+			return "已在 " + session.OpenBrowser + " 无痕窗口打开登录页，请在窗口里用目标账号登录，然后回到管理台点击「检查登录」或等待自动轮询。"
+		case session.OpenError != "":
+			return "无痕窗口打开失败（" + session.OpenError + "），请手动复制链接到无痕窗口登录，然后回到管理台点击「检查登录」。"
+		default:
+			return "请在打开的 CodeBuddy 页面完成登录，然后回到管理台点击「检查登录」或等待自动轮询。"
+		}
 	case "success":
 		return "CodeBuddy 登录成功，账号已写入账号池。"
 	case "failed":

@@ -6,8 +6,9 @@ LDFLAGS := -s -w -X github.com/wnddd839/codebuddy-proxy/internal/version.Version
 build:
 	go build -trimpath -ldflags="$(LDFLAGS)" -o bin/codebuddy-proxy ./cmd/codebuddy-proxy
 
+# GUI 托盘版必须用 GUI 子系统（-H=windowsgui），否则会常驻一个 CMD 黑窗口。
 build-gui:
-	go build -trimpath -ldflags="$(LDFLAGS)" -o bin/codebuddy-proxy-gui.exe ./cmd/codebuddy-proxy-gui
+	go build -trimpath -ldflags="$(LDFLAGS) -H=windowsgui" -o bin/codebuddy-proxy-gui.exe ./cmd/codebuddy-proxy-gui
 
 test:
 	go test ./...

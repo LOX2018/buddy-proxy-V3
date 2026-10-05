@@ -13,6 +13,10 @@ import (
 const defaultTTL = 45 * time.Minute
 const maxEntries = 4096
 
+// maxHeaderKeyLen 是客户端可控 session key 的最大明文长度；
+// 超过则哈希，防止任意大键打满内存/拖慢表操作。
+const maxHeaderKeyLen = 128
+
 // SessionLabel 用首条 user 消息做可读会话名（管理台展示）。
 func SessionLabel(messages []map[string]any) string {
 	for _, msg := range messages {
@@ -50,12 +54,12 @@ func Key(header http.Header, promptCacheKey string, messages []map[string]any) s
 			"Session-Id",
 		} {
 			if v := strings.TrimSpace(header.Get(name)); v != "" {
-				return "hdr:" + v
+				return "hdr:" + boundedSessionKey(v)
 			}
 		}
 	}
 	if v := strings.TrimSpace(promptCacheKey); v != "" {
-		return "hdr:" + v
+		return "hdr:" + boundedSessionKey(v)
 	}
 	prefix := conversationPrefix(messages)
 	if prefix == "" {
@@ -63,6 +67,16 @@ func Key(header http.Header, promptCacheKey string, messages []map[string]any) s
 	}
 	sum := sha256.Sum256([]byte(prefix))
 	return "msg:" + hex.EncodeToString(sum[:8])
+}
+
+// boundedSessionKey 保证客户端可控值作为 map key 时最长 maxHeaderKeyLen：
+// 超长值取 SHA-256 前 128 bit，短值保持原样（管理台可读）。
+func boundedSessionKey(v string) string {
+	if len(v) <= maxHeaderKeyLen {
+		return v
+	}
+	sum := sha256.Sum256([]byte(v))
+	return hex.EncodeToString(sum[:16])
 }
 
 func conversationPrefix(messages []map[string]any) string {

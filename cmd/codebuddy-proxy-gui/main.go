@@ -19,6 +19,7 @@ import (
 )
 
 func main() {
+	hideConsoleWindow()
 	cfg := config.Load()
 
 	if strings.TrimSpace(cfg.APIKey) == "" && len(cfg.APIKeys) == 0 {
@@ -33,7 +34,16 @@ func main() {
 		}
 	}
 
+	config.ScrubSecretEnv()
+
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
+
+	if !cfg.RequireAPIKey {
+		logger.Warn("api key enforcement disabled: /v1 is open to any client that can reach this machine", "addr", cfg.Addr(), "fix", "set CODEBUDDY_PROXY_REQUIRE_API_KEY=true")
+	}
+	if cfg.AdminPassword == "" {
+		logger.Warn("admin console has no password: anyone who can reach the admin URL can manage the pool", "admin", adminURLFor(cfg), "fix", "set CODEBUDDY_PROXY_ADMIN_PASSWORD")
+	}
 
 	svc := gateway.New(cfg, logger)
 	srv := server.New(cfg, svc)
@@ -98,4 +108,19 @@ func adminURLFor(cfg config.Config) string {
 		return base + "/direct-admin/"
 	}
 	return "http://" + cfg.Addr() + "/direct-admin/"
+}
+
+// hideConsoleWindow 隐藏宿主控制台窗口（SW_HIDE）。GUI 版按 GUI 子系统
+// 构建时本无控制台，GetConsoleWindow 返回 0，调用为空操作；若误用控制台
+// 子系统构建，则启动瞬间就会被隐藏，避免常驻黑窗口。
+func hideConsoleWindow() {
+	kernel32 := syscall.NewLazyDLL("kernel32.dll")
+	user32 := syscall.NewLazyDLL("user32.dll")
+	getConsoleWindow := kernel32.NewProc("GetConsoleWindow")
+	showWindow := user32.NewProc("ShowWindow")
+	hwnd, _, _ := getConsoleWindow.Call()
+	if hwnd != 0 {
+		const swHide = 0
+		_, _, _ = showWindow.Call(hwnd, swHide)
+	}
 }

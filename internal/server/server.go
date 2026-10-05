@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"strconv"
@@ -29,8 +30,10 @@ import (
 	"github.com/wnddd839/codebuddy-proxy/internal/opencode"
 	"github.com/wnddd839/codebuddy-proxy/internal/openprivate"
 	"github.com/wnddd839/codebuddy-proxy/internal/provider"
+	"github.com/wnddd839/codebuddy-proxy/internal/ratelimit"
 	"github.com/wnddd839/codebuddy-proxy/internal/sessionpin"
 	"github.com/wnddd839/codebuddy-proxy/internal/strutil"
+	"github.com/wnddd839/codebuddy-proxy/internal/updatecheck"
 	"github.com/wnddd839/codebuddy-proxy/internal/usagejournal"
 	"github.com/wnddd839/codebuddy-proxy/internal/version"
 )
@@ -41,10 +44,24 @@ type Server struct {
 
 	actOnce sync.Once
 	act     *activitylog.Logger
+
+	upd *updatecheck.Updater
+
+	// apiLockout / adminLockout 对鉴权失败按客户端 IP 做窗口锁，抑制口令爆破。
+	apiLockout   *ratelimit.Limiter
+	adminLockout *ratelimit.Limiter
+	// anonLimiter 限制 /readyz 与 /health?deep=1 这类匿名可触发的探测端点。
+	anonLimiter *ratelimit.Limiter
 }
 
 func New(cfg config.Config, svc *gateway.Service) *Server {
-	s := &Server{Svc: svc}
+	s := &Server{
+		Svc:          svc,
+		upd:          updatecheck.New(nil),
+		apiLockout:   ratelimit.New(20, 5*time.Minute),
+		adminLockout: ratelimit.New(20, 5*time.Minute),
+		anonLimiter:  ratelimit.New(30, time.Minute),
+	}
 	svc.OnActivity = func(kind string, fields map[string]any) {
 		s.LogActivity(kind, fields)
 	}
@@ -78,10 +95,17 @@ func New(cfg config.Config, svc *gateway.Service) *Server {
 		Addr:              cfg.Addr(),
 		Handler:           recoverHandler(svc.Log, mux, func(fields map[string]any) { s.LogActivity("server-error", fields) }),
 		ReadHeaderTimeout: 10 * time.Second,
-		ReadTimeout:       0,
-		WriteTimeout:      0,
-		IdleTimeout:       120 * time.Second,
+		// ReadTimeout 防慢速 body 拖死 worker；value 沿用上游 HTTP 超时（默认 120s），
+		// 不影响响应写入（流式 SSE 需 WriteTimeout 保持 0）。
+		ReadTimeout:  cfg.HTTPTimeout,
+		WriteTimeout: 0,
+		IdleTimeout:  120 * time.Second,
 	}
+	// 启动后预热上游版本检查，让首次打开管理台即可拿到结果（离线/墙内静默，不阻塞）。
+	go func() {
+		time.Sleep(3 * time.Second)
+		s.upd.Check(context.Background(), cfg.UpstreamRepo, version.Version)
+	}()
 	return s
 }
 
@@ -144,13 +168,40 @@ func (s *Server) ReadActivityLog(limit int) ([]map[string]any, int64, error) {
 
 func (s *Server) handleOptions(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Access-Control-Allow-Origin", "*")
-	w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, X-API-Key, X-Site")
+	w.Header().Set("Access-Control-Allow-Headers", "Authorization, Proxy-Authorization, Content-Type, X-API-Key, X-Site")
 	w.Header().Set("Access-Control-Allow-Methods", "GET,POST,DELETE,OPTIONS")
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// clientIP 取掉端口后的客户端地址（不回退 X-Forwarded-For，避免伪造绕过限速）。
+func clientIP(r *http.Request) string {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err == nil {
+		return host
+	}
+	return strings.TrimSpace(r.RemoteAddr)
+}
+
+func isLoopback(r *http.Request) bool {
+	switch clientIP(r) {
+	case "", "127.0.0.1", "::1", "localhost", "localhost.localdomain":
+		return true
+	}
+	return false
+}
+
+// allowAnonymous 对匿名可触发的端点做按 IP 限速。
+func (s *Server) allowAnonymous(r *http.Request) bool {
+	ok, _ := s.anonLimiter.Allow(clientIP(r))
+	return ok
+}
+
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	deep := queryTruthy(r.URL.Query().Get("deep"))
+	if deep && !s.allowAnonymous(r) {
+		httputil.WriteJSON(w, http.StatusTooManyRequests, map[string]any{"ok": false, "error": "health probe rate limit exceeded"})
+		return
+	}
 	payload := map[string]any{
 		"ok":        true,
 		"provider":  "codebuddy",
@@ -172,6 +223,11 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleReadyz(w http.ResponseWriter, r *http.Request) {
+	// 就绪探针会按需触发带凭据的上游探测：加按 IP 限速，防止被匿名打爆。
+	if !s.allowAnonymous(r) {
+		httputil.WriteJSON(w, http.StatusTooManyRequests, map[string]any{"ok": false, "error": "readyz rate limit exceeded"})
+		return
+	}
 	upstream := s.Svc.ProbeUpstream(r.Context(), false)
 	payload := map[string]any{
 		"ok":        upstream.OK,
@@ -231,15 +287,25 @@ func (s *Server) authorizeAPI(w http.ResponseWriter, r *http.Request) (bool, str
 	if !cfg.RequireAPIKey {
 		return true, ""
 	}
-	token := httputil.BearerToken(r)
+	// 标准 Authorization 之外兼容 Proxy-Authorization（反代/网关场景）与 X-API-Key。
+	token := httputil.BearerFromHeader(r, "Authorization")
+	if token == "" {
+		token = httputil.BearerFromHeader(r, "Proxy-Authorization")
+	}
 	if token == "" {
 		token = strings.TrimSpace(r.Header.Get("X-API-Key"))
 	}
 	ok, site := cfg.LookupAPIKey(token)
 	if !ok {
+		ip := clientIP(r)
+		if allowed, _ := s.apiLockout.Allow(ip); !allowed {
+			httputil.WriteJSON(w, http.StatusTooManyRequests, openai.NewError("Too many failed authentication attempts", "authentication_error"))
+			return false, ""
+		}
 		httputil.WriteJSON(w, http.StatusUnauthorized, openai.NewError("Missing or invalid API key", "authentication_error"))
 		return false, ""
 	}
+	s.apiLockout.Reset(clientIP(r))
 	return true, site
 }
 
@@ -248,13 +314,27 @@ func (s *Server) authorizeAdmin(w http.ResponseWriter, r *http.Request) bool {
 	if cfg.AdminPassword == "" {
 		return true
 	}
-	user, pass, ok := r.BasicAuth()
-	if ok && secretEqual(pass, cfg.AdminPassword) && (user == "" || user == "admin") {
+	ok := false
+	user, pass, hasBasic := r.BasicAuth()
+	if hasBasic && secretEqual(pass, cfg.AdminPassword) && (user == "" || user == "admin") {
+		ok = true
+	}
+	if !ok {
+		token := httputil.BearerFromHeader(r, "Authorization")
+		if token != "" && (secretEqual(token, cfg.AdminPassword) || secretEqual(token, cfg.APIKey)) {
+			ok = true
+		}
+	}
+	if ok {
+		s.adminLockout.Reset(clientIP(r))
 		return true
 	}
-	token := httputil.BearerToken(r)
-	if token != "" && (secretEqual(token, cfg.AdminPassword) || secretEqual(token, cfg.APIKey)) {
-		return true
+	// 鉴权失败按 IP 锁，抑制口令爆破。
+	// Allow 放行阈值内也计数；只在对 e.count>max 时拒绝（ok=false）。
+	if allowed, _ := s.adminLockout.Allow(clientIP(r)); !allowed {
+		w.Header().Set("WWW-Authenticate", `Basic realm="CodeBuddy Admin"`)
+		httputil.WriteJSON(w, http.StatusTooManyRequests, map[string]any{"ok": false, "error": "too many failed admin authentication attempts"})
+		return false
 	}
 	// 故意不支持 ?password= 查询参数鉴权：URL 中的密钥会进入代理日志、
 	// 浏览器历史与 Referer。请用 Basic Auth 或 Bearer。
@@ -337,13 +417,16 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request, keySite st
 }
 
 func resolveRequestSite(modelSite, headerSite, keySite string) string {
+	// modelSite 只在模型 ID 显式携带 cn:/global: 前缀时非空，属用户明确指定，优先。
 	if site := config.OptionalSite(modelSite); site != "" {
 		return site
 	}
-	if site := config.OptionalSite(headerSite); site != "" {
+	// 绑定到固定场所的 Key 其次：防止 X-Site 头把绑定 Key 的流量越权引到其它区域。
+	if site := config.OptionalSite(keySite); site != "" {
 		return site
 	}
-	return config.OptionalSite(keySite)
+	// X-Site 仅对未绑定的主 Key 生效（遗留迁移场景）。
+	return config.OptionalSite(headerSite)
 }
 
 // applyModelPolicy 按模型白名单过滤对外模型目录。
@@ -738,6 +821,10 @@ func (s *Server) handleAdminAPI(w http.ResponseWriter, r *http.Request, path str
 	case path == "/direct-admin/api/client-config" && r.Method == http.MethodGet:
 		httputil.WriteJSON(w, http.StatusOK, s.clientConfigPayload(publicOrigin))
 		return
+	case path == "/direct-admin/api/client-config/reveal" && r.Method == http.MethodPost:
+		// 完整密钥只在用户点击“复制/查看”时按需下发，避免随页面初载进入浏览器历史。
+		httputil.WriteJSON(w, http.StatusOK, s.clientConfigRevealPayload(publicOrigin))
+		return
 	case path == "/direct-admin/api/client-config/generate-key" && r.Method == http.MethodPost:
 		key, err := GenerateProxyAPIKey()
 		if err != nil {
@@ -793,30 +880,32 @@ func (s *Server) handleAdminAPI(w http.ResponseWriter, r *http.Request, path str
 		payload["generated"] = true
 		payload["envFile"] = envPath
 		payload["note"] = "绑定 Key 已写入 " + envPath + "，立即生效。"
+		payload["created"] = map[string]any{"site": site, "key": key}
 		httputil.WriteJSON(w, http.StatusOK, payload)
 		return
 	case path == "/direct-admin/api/client-config/bound-keys" && r.Method == http.MethodDelete:
 		var body struct {
-			Key string `json:"key"`
+			Site string `json:"site"`
 		}
 		_ = httputil.ReadJSON(r, &body)
-		target := strings.TrimSpace(body.Key)
+		// 按站点删除（不再回传/回比密钥本身），与 H2 掩码一致。
+		target := config.OptionalSite(body.Site)
 		if target == "" {
-			httputil.WriteJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "缺少要删除的绑定 Key"})
+			httputil.WriteJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "site 必须是 domestic 或 global"})
 			return
 		}
 		cfg := s.Svc.Config()
 		next := make([]config.APIKeyBinding, 0, len(cfg.APIKeys))
 		found := false
 		for _, binding := range cfg.APIKeys {
-			if binding.Key == target {
+			if config.OptionalSite(binding.Site) == target {
 				found = true
 				continue
 			}
 			next = append(next, binding)
 		}
 		if !found {
-			httputil.WriteJSON(w, http.StatusNotFound, map[string]any{"ok": false, "error": "绑定 Key 不存在"})
+			httputil.WriteJSON(w, http.StatusNotFound, map[string]any{"ok": false, "error": "该站点没有绑定 Key"})
 			return
 		}
 		envPath, err := s.persistBoundAPIKeys(next)
@@ -829,6 +918,7 @@ func (s *Server) handleAdminAPI(w http.ResponseWriter, r *http.Request, path str
 		}
 		payload := s.clientConfigPayload(publicOrigin)
 		payload["envFile"] = envPath
+		payload["deletedSite"] = target
 		httputil.WriteJSON(w, http.StatusOK, payload)
 		return
 	case path == "/direct-admin/api/codebuddy/status" && r.Method == http.MethodGet:
@@ -915,12 +1005,12 @@ func (s *Server) handleAdminAPI(w http.ResponseWriter, r *http.Request, path str
 		poolSite := config.NormalizeSite(strutil.First(body.Site, s.Svc.ActivePoolSite()))
 		result := billing.RunPoolCheckin(r.Context(), s.Svc.Provider, store, s.Svc.Config(), poolSite)
 		s.LogActivity("checkin", map[string]any{
-			"site":   result.PoolSite,
+			"site":    result.PoolSite,
 			"account": "号池",
-			"total":  result.Summary.Total,
-			"ok":     result.Summary.CheckedIn,
-			"done":   result.Summary.AlreadyDone,
-			"failed": result.Summary.Failed,
+			"total":   result.Summary.Total,
+			"ok":      result.Summary.CheckedIn,
+			"done":    result.Summary.AlreadyDone,
+			"failed":  result.Summary.Failed,
 		})
 		httputil.WriteJSON(w, http.StatusOK, result)
 		return
@@ -944,6 +1034,11 @@ func (s *Server) handleAdminAPI(w http.ResponseWriter, r *http.Request, path str
 		})
 		return
 	case path == "/direct-admin/api/system/open-config-dir" && r.Method == http.MethodPost:
+		// 仅允许本机回环客户端弹资源管理器窗口，防远程管理台被诱导弹窗。
+		if !isLoopback(r) {
+			httputil.WriteJSON(w, http.StatusForbidden, map[string]any{"ok": false, "error": "open-config-dir 仅允许本机调用"})
+			return
+		}
 		dir, err := openprivate.ConfigDir()
 		if err != nil {
 			httputil.WriteJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
@@ -1000,6 +1095,11 @@ func (s *Server) handleAdminAPI(w http.ResponseWriter, r *http.Request, path str
 	// 各账号签到状态。
 	case path == "/direct-admin/api/codebuddy/checkin-status" && r.Method == http.MethodGet:
 		s.handleCheckinStatus(w, r)
+		return
+	// 上游仓库版本监控（管理台弹窗提示用）。
+	case path == "/direct-admin/api/update/check" && r.Method == http.MethodGet:
+		httputil.WriteJSON(w, http.StatusOK, s.upd.Check(r.Context(), s.Svc.Config().UpstreamRepo, version.Version))
+		return
 	// Batch chat test for enabled accounts. Same-level path as checkin so it is not
 	// swallowed by /accounts/{id}. Optional body: {"site":"...","model":"..."}.
 	case path == "/direct-admin/api/codebuddy/test" && r.Method == http.MethodPost:
@@ -1204,7 +1304,7 @@ func (s *Server) handleAccountAction(w http.ResponseWriter, r *http.Request, pat
 		})
 		httputil.WriteJSON(w, http.StatusOK, result)
 		return
-	case r.Method == http.MethodGet && action == "usage":
+	case r.Method == http.MethodPost && action == "usage":
 		store, err := s.Svc.Pool.Read()
 		if err != nil {
 			httputil.WriteJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
@@ -1357,6 +1457,15 @@ func (s *Server) handleOAuthLaunch(w http.ResponseWriter, r *http.Request) {
 	}
 	session := s.Svc.CurrentOAuth()
 	if session.URL != "" && session.Status == "waiting" {
+		// 国际站授权一律走无痕窗口：这个链接若在浏览器当前窗口里打开，会带上已登录
+		// 的 CodeBuddy 会话，"授权新账号"就变成了给老账号重复授权。
+		if session.Site == "global" {
+			if browser, err := openprivate.OpenInPrivateWindow(session.URL); err == nil {
+				w.Header().Set("Set-Cookie", setCookie)
+				httputil.WriteHTML(w, http.StatusOK, admin.LaunchPage("已在 "+browser+" 无痕窗口打开登录页，请在该窗口完成登录后回到管理台点「检查登录」。", true))
+				return
+			}
+		}
 		w.Header().Set("Set-Cookie", setCookie)
 		w.Header().Set("Cache-Control", "no-store")
 		http.Redirect(w, r, session.URL, http.StatusFound)
@@ -1407,7 +1516,6 @@ func (s *Server) clientConfigPayload(publicOrigin string) map[string]any {
 			"site":       binding.Site,
 			"preview":    strutil.MaskSecret(binding.Key, 6),
 			"configured": true,
-			"key":        binding.Key,
 		})
 	}
 	return map[string]any{
@@ -1421,14 +1529,31 @@ func (s *Server) clientConfigPayload(publicOrigin string) map[string]any {
 		"requireApiKey":      cfg.RequireAPIKey,
 		"apiKeyConfigured":   key != "",
 		"apiKeyPreview":      strutil.MaskSecret(key, 6),
-		"apiKey":             key,
-		"apiKeys":            bound,
-		"transport":          cfg.Transport,
-		"site":               s.Svc.ActivePoolSite(),
-		"poolSite":           s.Svc.ActivePoolSite(),
-		"product":            s.Svc.ActiveProduct(),
-		"poolProduct":        s.Svc.ActiveProduct(),
+		// 完整密钥不随列表下发，仅通过 client-config/reveal 显式索取，防浏览器扩展/历史抓取。
+		"apiKey":      "",
+		"apiKeys":     bound,
+		"transport":   cfg.Transport,
+		"site":        s.Svc.ActivePoolSite(),
+		"poolSite":    s.Svc.ActivePoolSite(),
+		"product":     s.Svc.ActiveProduct(),
+		"poolProduct": s.Svc.ActiveProduct(),
 	}
+}
+
+// clientConfigRevealPayload 返回含完整密钥的镜像配置，仅经带鉴权的 reveal 端点下发。
+func (s *Server) clientConfigRevealPayload(publicOrigin string) map[string]any {
+	cfg := s.Svc.Config()
+	payload := s.clientConfigPayload(publicOrigin)
+	payload["apiKey"] = strings.TrimSpace(cfg.APIKey)
+	bound := make([]map[string]any, 0, len(cfg.APIKeys))
+	for _, binding := range cfg.APIKeys {
+		bound = append(bound, map[string]any{
+			"site": binding.Site,
+			"key":  binding.Key,
+		})
+	}
+	payload["apiKeys"] = bound
+	return payload
 }
 
 func (s *Server) persistBoundAPIKeys(keys []config.APIKeyBinding) (string, error) {

@@ -3,6 +3,7 @@ package gateway
 import (
 	"log/slog"
 	"os"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -82,4 +83,24 @@ func TestRaceOAuthResetAndLaunchAuthorize(t *testing.T) {
 	time.Sleep(250 * time.Millisecond)
 	close(stop)
 	wg.Wait()
+}
+
+// 国际站授权改走无痕窗口后，管理台文案必须区分"已打开 / 打开失败 / 不适用"，
+// 否则用户不知道去哪儿完成登录。
+func TestOAuthWaitingMessageTracksPrivateWindow(t *testing.T) {
+	cases := []struct {
+		name    string
+		session OAuthSession
+		want    string
+	}{
+		{"opened", OAuthSession{Status: "waiting", OpenBrowser: "edge"}, "已在 edge 无痕窗口打开登录页"},
+		{"failed", OAuthSession{Status: "waiting", OpenError: "no Edge or Chrome installation found"}, "无痕窗口打开失败"},
+		{"legacy", OAuthSession{Status: "waiting"}, "请在打开的 CodeBuddy 页面完成登录"},
+	}
+	for _, tc := range cases {
+		got := oauthMessage(tc.session)
+		if !strings.Contains(got, tc.want) {
+			t.Fatalf("%s: oauthMessage = %q, want it to contain %q", tc.name, got, tc.want)
+		}
+	}
 }

@@ -5,7 +5,16 @@
 
 ---
 
-## 未发布
+## v0.5.6 · 2026-10-04 · 国际站授权走无痕窗口 · 上游请求不再被环境代理劫持
+
+### 改动
+
+- **国际站授权改由 Edge 无痕窗口打开。** 管理台原先用 `window.open` 在当前浏览器标签页打开登录链接，那个标签页带着已登录的 CodeBuddy 会话，于是"再授权一个账号"实际是把同一个账号授权第二次——号池按「身份 + 站点」判重，列表里不会多出第二行，看起来就像新账号"消失了"。现在 `site=global` 的授权由服务端拉起 `msedge --inprivate`（Edge 只注册在 App Paths 注册表、不在 PATH 上，所以按 `LOCALAPPDATA` / `ProgramFiles` / `ProgramFiles(x86)` 的安装目录扫描定位；找不到 Edge 时退 `chrome --incognito`），管理台不再另开普通标签页，「启动登录」链接与 `/oauth/launch` 兜底路径同样走无痕窗口。打不开浏览器时退回原重定向，并把原因写在提示里。国内站行为不变。
+
+### 修复
+
+- **国际站登录与全部上游请求不再被环境代理劫持。** `internal/provider` 的 Transport 原先 `Proxy: http.ProxyFromEnvironment`，机器上为 GitHub 等站点配置的 `HTTPS_PROXY` 会把 `www.codebuddy.ai` 一起带走，而该代理连不上它（`TLS handshake timeout`）——登录、刷新 token、Credits、模型目录、对话同时失败，国内站两头都通所以看不出来。现在产品自身主机默认直连，需要代理时用新变量 `CODEBUDDY_PROXY_UPSTREAM_PROXY` 显式指定；第三方出站（GitHub 版本检查）仍跟随环境代理。
+- **上游版本检查带令牌、失败不再钉 6 小时。** 匿名 GitHub API 限额按出口 IP 计（60 次/时），共享代理下常被陌生人耗光并返回 403；检查到 `GITHUB_TOKEN` / `GH_TOKEN` 时改为认证请求（5000 次/时），403/429 的报错文案提示设置令牌。失败结论的缓存从 6 小时缩短到 15 分钟，抓取改用检查器自己的 client 与调用方 ctx（此前自建 client 绕过了注入的超时与重定向策略）。
 
 ---
 

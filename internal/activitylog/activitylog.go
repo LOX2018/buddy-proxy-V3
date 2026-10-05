@@ -49,10 +49,10 @@ func New(path string) (*Logger, error) {
 	if path == "" {
 		return nil, fmt.Errorf("activitylog: empty path")
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, err
 	}
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
 		return nil, err
 	}
@@ -165,7 +165,7 @@ func (l *Logger) resetForTodayLocked() {
 		l.file = nil
 	}
 	_ = os.Remove(l.path + ".1")
-	f, err := os.OpenFile(l.path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC|os.O_APPEND, 0o644)
+	f, err := os.OpenFile(l.path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC|os.O_APPEND, 0o600)
 	if err != nil {
 		return
 	}
@@ -188,7 +188,7 @@ func (l *Logger) maybeRotateLocked() {
 	backup := l.path + ".1"
 	_ = os.Remove(backup)
 	_ = os.Rename(l.path, backup)
-	f, err := os.OpenFile(l.path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	f, err := os.OpenFile(l.path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
 		return
 	}
@@ -197,7 +197,7 @@ func (l *Logger) maybeRotateLocked() {
 
 // Tail 返回文件末尾最近 n 条事件（从新到旧）与文件当前字节数。
 // 文件不存在时返回空切片与 size=0，不视为错误。
-// 若文件最后写入时间不是当天，则视为已过期：清空文件（并删除轮转备份），当天尚未产生记录。
+// Tail 只读：不截断、不删除轮转备份，避免 GET 视口产生副作用。
 func Tail(path string, n int) ([]map[string]any, int64, error) {
 	if n <= 0 {
 		n = 100
@@ -208,13 +208,6 @@ func Tail(path string, n int) ([]map[string]any, int64, error) {
 			return nil, 0, nil
 		}
 		return nil, 0, err
-	}
-	if todayKey(fi.ModTime()) != todayKey(time.Now()) {
-		_ = os.Remove(path + ".1")
-		if err := os.Truncate(path, 0); err != nil {
-			return nil, 0, err
-		}
-		return nil, 0, nil
 	}
 	raw, err := os.ReadFile(path)
 	if err != nil {

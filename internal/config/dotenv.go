@@ -153,7 +153,7 @@ func UpsertEnvFile(path string, values map[string]string) error {
 	if path == "" {
 		return fmt.Errorf("empty env file path")
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil && !os.IsExist(err) {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil && !os.IsExist(err) {
 		// 目录可能是 "."，忽略即可。
 		if filepath.Dir(path) != "." {
 			return err
@@ -239,6 +239,26 @@ func UpsertEnvFile(path string, values map[string]string) error {
 
 	content := strings.Join(out, "\n") + "\n"
 	return atomicwrite.Write(path, []byte(content), 0o600)
+}
+
+// secretEnvKeys 是进程运行时不再需要的密钥环境变量；
+// 启动完成、Config 已持有对应值后用 ScrubSecretEnv 摘除，
+// 防止 secrets 透过 /proc/<pid>/environ 或子进程环境泄露。
+var secretEnvKeys = []string{
+	"CODEBUDDY_PROXY_API_KEY",
+	"CODEBUDDY_PROXY_API_KEYS",
+	"CODEBUDDY_PROXY_ADMIN_PASSWORD",
+	"CURSOR_DIRECT_API_KEY",
+	"CURSOR_DIRECT_ADMIN_PASSWORD",
+	"CURSOR_GATEWAY_API_KEY",
+	"CURSOR_GATEWAY_ADMIN_PASSWORD",
+}
+
+// ScrubSecretEnv 清除进程环境中的密钥条目。
+func ScrubSecretEnv() {
+	for _, key := range secretEnvKeys {
+		_ = os.Unsetenv(key)
+	}
 }
 
 func escapeEnvValue(value string) string {

@@ -40,10 +40,18 @@ func main() {
 		}
 		cfg.APIKey = key
 		cfg.RequireAPIKey = true
-		_ = os.Setenv("CODEBUDDY_PROXY_API_KEY", key)
-		_ = os.Setenv("CODEBUDDY_PROXY_REQUIRE_API_KEY", "true")
 		generatedKey = true
 		logger.Debug("generated and saved gateway api key", "path", envPath)
+	}
+
+	// 启动配置已就绪后清掉进程环境里的密钥，防止 secrets 外泄到子进程/诊断命令。
+	config.ScrubSecretEnv()
+
+	if !cfg.RequireAPIKey {
+		logger.Warn("api key enforcement disabled: /v1 is open to any client that can reach this machine", "addr", cfg.Addr(), "fix", "set CODEBUDDY_PROXY_REQUIRE_API_KEY=true")
+	}
+	if cfg.AdminPassword == "" {
+		logger.Warn("admin console has no password: anyone who can reach the admin URL can manage the pool", "admin", adminURL(cfg), "fix", "set CODEBUDDY_PROXY_ADMIN_PASSWORD")
 	}
 
 	svc := gateway.New(cfg, logger)

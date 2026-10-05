@@ -19,8 +19,10 @@ func AdminMutationAllowed(r *http.Request) bool {
 		return true
 	}
 	host := strings.TrimSpace(r.Host)
-	if fwd := strings.TrimSpace(r.Header.Get("X-Forwarded-Host")); fwd != "" {
-		host = fwd
+	if TrustForwardedHeaders() {
+		if fwd := strings.TrimSpace(r.Header.Get("X-Forwarded-Host")); fwd != "" {
+			host = fwd
+		}
 	}
 	if origin != "" {
 		return hostMatchesURL(origin, host)

@@ -4,8 +4,10 @@ package tray
 
 import (
 	"encoding/binary"
+	"net/url"
 	"os/exec"
 	"runtime"
+	"strings"
 	"syscall"
 	"unsafe"
 )
@@ -408,8 +410,8 @@ func copyStringToUTF16(dst []uint16, s string) {
 	dst[len(dst)-1] = 0
 }
 
-func openURL(url string) {
-	exec.Command("cmd", "/c", "start", "", url).Start()
+func openURL(target string) {
+	launchURL(target)
 }
 
 type errorString string
@@ -418,6 +420,18 @@ func (e errorString) Error() string { return string(e) }
 
 func fmtError(s string) error { return errorString(s) }
 
-func OpenURL(url string) {
-	exec.Command("cmd", "/c", "start", "", url).Start()
+func OpenURL(target string) {
+	launchURL(target)
+}
+
+// launchURL 用 rundll32 调默认浏览器打开 http(s) 链接。
+// 相比 `cmd /c start`，不经过 cmd 解析，避免 URL 中的元字符被当作命令执行，
+// 同时只放行 http/https 协议。
+func launchURL(target string) {
+	target = strings.TrimSpace(target)
+	u, err := url.Parse(target)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") {
+		return
+	}
+	_ = exec.Command("rundll32", "url.dll,FileProtocolHandler", target).Start()
 }

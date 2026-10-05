@@ -5,8 +5,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
-
-	"github.com/wnddd839/codebuddy-proxy/internal/openai"
 )
 
 type writeCounter struct {
@@ -31,7 +29,11 @@ func TestSSEStreamWriteStreamChunk(t *testing.T) {
 	if !ok {
 		t.Fatal("expected flusher")
 	}
-	chunk := openai.StreamChunkOf("id1", "auto", openai.Delta{Content: "hello"}, nil)
+	chunk := map[string]any{
+		"id":      "id1",
+		"model":   "auto",
+		"choices": []map[string]any{{"index": 0, "delta": map[string]any{"content": "hello"}}},
+	}
 	want, err := json.Marshal(chunk)
 	if err != nil {
 		t.Fatal(err)

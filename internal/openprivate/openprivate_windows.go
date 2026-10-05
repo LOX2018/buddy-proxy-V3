@@ -15,7 +15,7 @@ func ConfigDir() (string, error) {
 		return "", err
 	}
 	dir := filepath.Join(home, ConfigDirName)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", err
 	}
 	return dir, nil
@@ -34,7 +34,8 @@ func OpenDirectory(dir string) error {
 	if file.IsDir() {
 		return exec.Command("explorer", abs).Start()
 	}
-	return exec.Command("explorer", "/select,", abs).Start()
+	// /select, 必须与路径拼成单个参数，否则 explorer 会把 "/select," 当目录打开。
+	return exec.Command("explorer", "/select,"+abs).Start()
 }
 
 // OpenConfigDir 打开私有配置目录。

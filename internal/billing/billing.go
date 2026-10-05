@@ -14,6 +14,7 @@ import (
 
 	"github.com/wnddd839/codebuddy-proxy/internal/accounts"
 	"github.com/wnddd839/codebuddy-proxy/internal/config"
+	"github.com/wnddd839/codebuddy-proxy/internal/httputil"
 	"github.com/wnddd839/codebuddy-proxy/internal/provider"
 	"github.com/wnddd839/codebuddy-proxy/internal/strutil"
 )
@@ -344,7 +345,7 @@ func mapDosageNotify(data map[string]any) Notify {
 
 func postJSON(ctx context.Context, httpClient *http.Client, endpoint string, headers http.Header, body any) (map[string]any, error) {
 	if httpClient == nil {
-		httpClient = &http.Client{Timeout: 20 * time.Second}
+		httpClient = &http.Client{Timeout: 20 * time.Second, CheckRedirect: httputil.SameOriginRedirectPolicy}
 	}
 	raw, err := json.Marshal(body)
 	if err != nil {

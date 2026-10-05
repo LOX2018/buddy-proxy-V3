@@ -8,7 +8,7 @@ import (
 // UIRevision is the admin console markup/script stamp. Bump it on every
 // meaningful change to PageHTML so operators can tell the rebuilt binary
 // carries the new UI (independent of the release tag injected via ldflags).
-const UIRevision = "2026.09.23-status-pills"
+const UIRevision = "2026.10.04-oauth-inprivate"
 
 func PageHTML() string {
 	return `<!doctype html>
@@ -85,6 +85,9 @@ a{color:inherit;text-decoration:none}
   box-shadow:0 0 6px rgba(63,198,176,.8);
 }
 .pill .dot.bad{background:transparent;border:1px solid var(--danger);box-shadow:none;border-color:var(--danger)}
+.pill[hidden]{display:none}
+.pill.upd{color:#ffc456;cursor:pointer;position:relative}
+.pill.upd:hover{text-decoration:underline}
 
 /* 核心切页导航条 (Editorial Chapter Navigation) */
 .tabs-nav{
@@ -341,6 +344,35 @@ pre{
 }
 .toast.show{opacity:1}
 .toast.err{background:var(--danger);color:#12060a;border-color:var(--danger)}
+.modal-mask{
+  position:fixed;inset:0;z-index:120;display:flex;align-items:center;justify-content:center;
+  background:rgba(8,11,15,.72);backdrop-filter:blur(4px);padding:24px;
+}
+.modal-mask[hidden]{display:none}
+.modal{
+  width:min(520px,100%);max-height:78dvh;overflow:auto;
+  background:var(--surface);border:1px solid var(--fg-16);border-radius:12px;
+  box-shadow:0 24px 64px rgba(0,0,0,.5);
+}
+.modal .modal-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;flex-wrap:wrap;padding:22px 22px 0}
+.modal .modal-head .eyebrow{margin:0}
+.modal h2{margin:6px 0 0;font-family:var(--display);font-size:22px;font-weight:400;letter-spacing:-.02em}
+.modal .modal-meta{padding-top:4px;font-size:12px;letter-spacing:.04em;color:var(--fg-60);text-align:right;line-height:1.6}
+.modal .modal-body{
+  margin:14px 22px 0;padding-top:14px;border-top:1px solid var(--fg-10);
+  font-size:12.5px;line-height:1.7;color:var(--fg-80);
+  white-space:pre-wrap;word-break:break-word;overflow-wrap:anywhere;
+}
+.modal .modal-actions{display:flex;justify-content:flex-end;gap:10px;padding:20px 22px 22px}
+.modal .modal-actions a,.modal .modal-actions button{
+  display:inline-flex;align-items:center;justify-content:center;min-width:96px;
+  padding:9px 16px;font-size:11px;letter-spacing:.1em;text-transform:uppercase;font-weight:600;
+  border-radius:6px;cursor:pointer;text-decoration:none;
+}
+.modal .modal-actions a{background:var(--accent);color:#08130f;border:1px solid var(--accent)}
+.modal .modal-actions a:hover{filter:brightness(1.12)}
+.modal .modal-actions button{background:transparent;color:var(--fg-70);border:1px solid var(--fg-16)}
+.modal .modal-actions button:hover{color:var(--fg);border-color:var(--fg-40)}
 .usage-line{margin-top:4px;font-size:12px}
 .usage-line .pill{display:inline-flex;padding:2px 8px;font-family:var(--mono);font-size:11px;border:1px solid var(--fg-16);border-radius:99px;color:var(--fg)}
 .usage-line .pill.good{border-color:var(--accent);color:var(--accent);font-weight:500}
@@ -438,6 +470,7 @@ pre{
   <header class="topbar">
     <div class="pillrow">
       <span class="pill"><span class="dot" id="healthDot"></span><span id="healthText">检查中</span></span>
+      <span class="pill upd" id="pillUpdate" hidden title="点击查看上游发布页"><span id="pillUpdateText"></span></span>
     </div>
   </header>
 
@@ -888,6 +921,23 @@ pre{
         <div class="meta-line" id="configDirLine" style="font-size:12px;color:var(--fg-40);margin-top:6px">—</div>
       </div>
     </section>
+  </div>
+</div>
+
+<div class="modal-mask" id="updModal" hidden>
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="updTitle">
+    <div class="modal-head">
+      <div>
+        <div class="eyebrow">Upstream Update</div>
+        <h2 id="updTitle">发现新版本</h2>
+      </div>
+      <div class="modal-meta" id="updMeta"></div>
+    </div>
+    <div class="modal-body" id="updBody"></div>
+    <div class="modal-actions">
+      <a id="updLink" href="#" target="_blank" rel="noopener noreferrer">去下载</a>
+      <button id="updDismiss" type="button">知道了</button>
+    </div>
   </div>
 </div>
 
@@ -1579,29 +1629,36 @@ function renderBoundApiKeys(list){
   box.innerHTML = list.map(function(item){
     const site = normalizeSite(item.site);
     const preview = escapeHtml(item.preview || '已配置');
-    const key = String(item.key || '');
     return '<div class="bound-key">' +
       '<div class="meta"><span class="mono">' + preview + '</span>' +
         '<span class="badge site">' + escapeHtml(siteLabel(site)) + '</span></div>' +
       '<div class="actions">' +
-        '<button class="ghost" data-act="copy-bound" data-key="' + escapeHtml(key) + '" type="button">复制</button>' +
-        '<button class="danger" data-act="delete-bound" data-key="' + escapeHtml(key) + '" type="button">删除</button>' +
+        '<button class="ghost" data-act="copy-bound" data-site="' + escapeHtml(site) + '" type="button">复制</button>' +
+        '<button class="danger" data-act="delete-bound" data-site="' + escapeHtml(site) + '" type="button">删除</button>' +
       '</div></div>';
   }).join('');
   box.querySelectorAll('button[data-act]').forEach(function(btn){
     btn.addEventListener('click', onBoundKeyAction);
   });
 }
+async function revealClientConfig(){
+  return await api('/direct-admin/api/client-config/reveal', {method:'POST', body:'{}'});
+}
 async function onBoundKeyAction(ev){
   const btn = ev.currentTarget;
   const act = btn.getAttribute('data-act');
-  const key = btn.getAttribute('data-key') || '';
+  const site = btn.getAttribute('data-site') || '';
   if (act === 'copy-bound') {
-    return copyText(key, '绑定 Key', btn);
+    if (!site) return;
+    const revealed = await revealClientConfig();
+    const item = (revealed.apiKeys || []).filter(function(x){ return x && x.site === site; }).pop();
+    if (!item || !item.key) { showToast('未找到该区域的绑定 Key', 'error'); return; }
+    return copyText(item.key, '绑定 Key', btn);
   }
   if (act === 'delete-bound') {
-    if (!confirm('删除这把区域绑定 Key？主 API Key 不会被删。')) return;
-    const data = await api('/direct-admin/api/client-config/bound-keys', {method:'DELETE', body: JSON.stringify({key:key})});
+    if (!site) return;
+    if (!confirm('删除该区域的绑定 Key？主 API Key 不会被删。')) return;
+    const data = await api('/direct-admin/api/client-config/bound-keys', {method:'DELETE', body: JSON.stringify({site:site})});
     paintClientConfig(data);
     showToast('绑定 Key 已删除');
   }
@@ -1610,7 +1667,7 @@ async function generateBoundKey(){
   const site = $('boundKeySite') ? $('boundKeySite').value : 'global';
   const data = await api('/direct-admin/api/client-config/bound-keys', {method:'POST', body: JSON.stringify({site:site})});
   paintClientConfig(data);
-  const created = (data.apiKeys || []).filter(function(item){ return item && item.key && item.site === normalizeSite(site); }).pop();
+  const created = data.created;
   if (created && created.key) await copyText(created.key, '绑定 Key', $('btnNewBoundKey'));
   if (data.note) showToast(data.note);
 }
@@ -1623,7 +1680,8 @@ async function generateApiKey(){
   if (!confirm('生成新的网关 API Key？\n\n旧 Key 会立即失效，新 Key 会写入 .env 并在重启后继续生效。\n请同步更新 ZCode / NewAPI 等客户端配置。')) return;
   const data = await api('/direct-admin/api/client-config/generate-key', {method:'POST', body:'{}'});
   paintClientConfig(data);
-  if (data.apiKey) await copyText(data.apiKey, '新 API Key', $('btnGenerateKey'));
+  const revealed = await revealClientConfig();
+  if (revealed.apiKey) await copyText(revealed.apiKey, '新 API Key', $('btnGenerateKey'));
   if (data.note) showToast(data.note);
 }
 
@@ -1757,10 +1815,13 @@ async function startOAuth(){
     body: JSON.stringify({site:$('site').value, label:$('label').value, reuseExisting:false})
   });
   paintOAuth(data);
-  const url = (data.login && data.login.url) || (data.session && data.session.url) || '#';
-  const launch = (data.login && data.login.launchUrl) || (data.session && data.session.launchUrl) || url;
+  const session = (data && data.session) || {};
+  const url = (data.login && data.login.url) || session.url || '#';
+  const launch = (data.login && data.login.launchUrl) || session.launchUrl || url;
   $('launchLink').href = launch;
-  if (url && url !== '#') window.open(url, '_blank', 'noopener');
+  // 服务端已经用无痕窗口拉起时不要再开普通标签页：那会带着浏览器里已登录的
+  // CodeBuddy 会话，等于给同一个账号重复授权。
+  if (url && url !== '#' && !session.openBrowser) window.open(url, '_blank', 'noopener');
 }
 
 async function pollOAuth(){
@@ -1772,7 +1833,7 @@ async function pollOAuth(){
 
 async function fetchAccountUsage(accountId, silent){
   try {
-    const result = await api('/direct-admin/api/codebuddy/accounts/'+encodeURIComponent(accountId)+'/usage');
+    const result = await api('/direct-admin/api/codebuddy/accounts/'+encodeURIComponent(accountId)+'/usage', {method:'POST', body:'{}'});
     usageByAccount[accountId] = result;
     if (!silent) {
       const credits = result.credits || {};
@@ -1867,9 +1928,12 @@ if ($('copyResponsesUrl')) $('copyResponsesUrl').onclick = function(){ copyText(
 $('copyModel').onclick = function(){ copyText($('openAiModel').value, '模型', $('copyModel')); };
 $('copyApiKey').onclick = function(){
   refreshClientConfig().then(function(cfg){
-    if (!cfg.apiKey) { showToast('API Key 未配置', 'error'); return; }
+    if (!cfg.apiKeyConfigured) { $('openAiApiKey').value = ''; showToast('API Key 未配置', 'error'); return; }
     $('openAiApiKey').value = cfg.apiKeyPreview || '已配置 · 点击复制';
-    return copyText(cfg.apiKey, 'API Key', $('copyApiKey'));
+    return revealClientConfig().then(function(full){
+      if (!full.apiKey) { showToast('API Key 未配置', 'error'); return; }
+      return copyText(full.apiKey, 'API Key', $('copyApiKey'));
+    });
   }).catch(function(e){ showToast(e.message, 'error'); });
 };
 refreshStatus().catch(function(e){ $('statusRaw').textContent = e.message; setHealth(false, '无法连接'); });
@@ -1878,6 +1942,47 @@ refreshModels().catch(function(){});
 loadModelPolicy().catch(function(){});
 refreshCheckin().catch(function(){});
 setInterval(function(){ refreshStatus().catch(function(){}); }, 15000);
+
+/* 上游版本监控 (Upstream Update Check) */
+let updShownTag = null;
+try { updShownTag = localStorage.getItem('cbpUpdShownTag') || null; } catch(e){}
+async function refreshUpdateCheck(){
+  let d = null;
+  try { d = await api('/direct-admin/api/update/check'); }
+  catch(e){ d = null; }
+  const pill = $('pillUpdate');
+  if (!pill) return;
+  if (d && d.updateAvailable && d.latestTag) {
+    $('pillUpdateText').textContent = d.latestTag + ' 可更新';
+    pill.hidden = false;
+    pill.onclick = function(){ if (d && d.url) window.open(d.url, '_blank'); };
+    if (updShownTag !== d.latestTag) {
+      updShownTag = d.latestTag;
+      try { localStorage.setItem('cbpUpdShownTag', d.latestTag); } catch(e){}
+      showUpdateModal(d);
+    }
+  } else {
+    pill.hidden = true;
+  }
+}
+function showUpdateModal(d){
+  const meta = [];
+  if (d.publishedAt) {
+    const t = new Date(d.publishedAt);
+    if (!isNaN(t.getTime())) meta.push('发布于 ' + t.toLocaleDateString());
+  }
+  meta.push('当前 ' + (d.currentVersion || '未知版本'));
+  if (d.repo) meta.push(d.repo);
+  $('updTitle').textContent = '发现新版本 ' + (d.latestTag || '');
+  $('updMeta').textContent = meta.join(' · ');
+  $('updBody').textContent = d.notes || ('上游仓库已发布新版本，点击“去下载”前往 GitHub 查看发布说明。');
+  $('updLink').href = d.url || (d.repo ? ('https://github.com/' + d.repo + '/releases/latest') : '#');
+  $('updModal').hidden = false;
+}
+$('updDismiss').onclick = function(){ $('updModal').hidden = true; };
+$('updModal').addEventListener('click', function(e){ if (e.target === this) this.hidden = true; });
+refreshUpdateCheck();
+setInterval(function(){ refreshUpdateCheck(); }, 30 * 60 * 1000);
 
 /* 活动与系统 (Tab 07) */
 function fmtTs(ts){

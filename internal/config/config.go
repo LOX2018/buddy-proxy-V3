@@ -2,6 +2,7 @@ package config
 
 import (
 	"crypto/subtle"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -14,6 +15,8 @@ const (
 	DefaultPort                = 32126
 	DefaultChatCompletionsPath = "/v2/chat/completions"
 	DefaultTransport           = "protocol_direct"
+	// InternalBaseURL 是 ioa / 内网环境的上游入口。
+	InternalBaseURL            = "https://copilot.tencent.com"
 	DefaultIDEVersion          = "2.117.2"
 	DefaultWorkBuddyIDEVersion = "1.119.0"
 	DefaultWorkBuddyProductVer = "4.9.29177644"
@@ -58,6 +61,10 @@ type Config struct {
 	MaxIdleConnsPerHost int
 	IdleConnTimeout     time.Duration
 	DefaultModels       []string
+	UpstreamRepo        string
+	// UpstreamProxy 非空时，上游（CodeBuddy / WorkBuddy）请求改走这把代理；
+	// 为空时上游主机默认直连，不跟随环境里的 HTTP(S)_PROXY。
+	UpstreamProxy string
 }
 
 func Load() Config {
@@ -87,6 +94,8 @@ func Load() Config {
 		MaxIdleConnsPerHost: DefaultMaxIdleConnsPerHost,
 		IdleConnTimeout:     DefaultIdleConnTimeout,
 		DefaultModels:       []string{"auto"},
+		UpstreamRepo:        envOr("CODEBUDDY_PROXY_UPSTREAM_REPO", "", "wnddd839/buddy-proxy"),
+		UpstreamProxy:       firstEnv("CODEBUDDY_PROXY_UPSTREAM_PROXY"),
 	}
 
 	// 管理台密码为空则开放管理页（本地友好）。
@@ -123,12 +132,28 @@ func resolveDefaultBaseURL(site, internetEnvironment, product string) string {
 	env := strings.ToLower(strings.TrimSpace(internetEnvironment))
 	site = strings.ToLower(strings.TrimSpace(site))
 	if env == "internal" || env == "ioa" {
-		return "https://copilot.tencent.com"
+		return InternalBaseURL
 	}
 	if site == "domestic" || site == "cn" || site == "china" || env == "domestic" || env == "cn" || env == "china" {
 		return "https://www.codebuddy.cn"
 	}
 	return "https://www.codebuddy.ai"
+}
+
+// UpstreamHosts 返回产品自身会访问的上游主机（不含 GitHub 之类的第三方）。
+func UpstreamHosts() []string {
+	hosts := make([]string, 0, 5)
+	if u, err := url.Parse(InternalBaseURL); err == nil {
+		hosts = append(hosts, u.Host)
+	}
+	for _, site := range []string{"domestic", "global"} {
+		for _, product := range []string{"codebuddy", "workbuddy"} {
+			if u, err := url.Parse(ProductPortalBaseURL(site, product)); err == nil {
+				hosts = append(hosts, u.Host)
+			}
+		}
+	}
+	return hosts
 }
 
 func defaultAccountsPath() string {

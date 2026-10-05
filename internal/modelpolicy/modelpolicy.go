@@ -21,6 +21,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/wnddd839/codebuddy-proxy/internal/atomicwrite"
 	"github.com/wnddd839/codebuddy-proxy/internal/models"
 )
 
@@ -72,19 +73,11 @@ func (p Policy) Save(path string) error {
 	}
 	raw = append(raw, '\n')
 	if dir := filepath.Dir(path); dir != "" {
-		if err := os.MkdirAll(dir, 0o755); err != nil {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
 			return err
 		}
 	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, raw, 0o600); err != nil {
-		return err
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		_ = os.Remove(tmp)
-		return err
-	}
-	return nil
+	return atomicwrite.Write(path, raw, 0o600)
 }
 
 // Manager 提供带缓存（mtime 变更感知）的策略读写。

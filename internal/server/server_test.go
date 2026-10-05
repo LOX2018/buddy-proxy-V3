@@ -93,10 +93,16 @@ func TestResolveRequestSite(t *testing.T) {
 	cases := []struct {
 		model, header, key, want string
 	}{
+		// M2 修复后语义：显式模型前缀 cn:/global: > 绑定 Key 场所 > X-Site 头。
 		{"global", "cn", "domestic", "global"},
-		{"", "cn", "global", "domestic"},
+		{"global", "cn", "global", "global"},
+		{"", "cn", "global", "global"},
 		{"", "", "cn", "domestic"},
+		{"", "", "global", "global"},
 		{"", "", "", ""},
+		// 未绑定（keySite 为空）时保留原 model > header 的择站逻辑。
+		{"global", "cn", "", "global"},
+		{"", "cn", "", "domestic"},
 	}
 	for _, tc := range cases {
 		got := resolveRequestSite(tc.model, tc.header, tc.key)
@@ -774,21 +780,50 @@ func TestClientConfigIncludesBoundAPIKeys(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
 		t.Fatal(err)
 	}
-	if payload.APIKey != "cbp_primary" || !payload.APIKeyConfigured || payload.APIKeyPreview == "" {
-		t.Fatalf("primary apiKey shape changed: %+v", payload)
+	// H2：列表接口不再返回完整主 Key 与绑定 Key。
+	if payload.APIKey != "" || !payload.APIKeyConfigured || payload.APIKeyPreview == "" {
+		t.Fatalf("primary apiKey must be masked: %+v", payload)
 	}
 	if len(payload.APIKeys) != 2 {
 		t.Fatalf("apiKeys=%d want 2 body=%s", len(payload.APIKeys), rec.Body.String())
 	}
-	byKey := map[string]string{}
+	bySite := map[string]string{}
 	for _, item := range payload.APIKeys {
-		if !item.Configured || item.Preview == "" || item.Key == "" {
-			t.Fatalf("bound key incomplete: %+v", item)
+		if !item.Configured || item.Preview == "" || item.Key != "" {
+			t.Fatalf("bound key must be masked without key: %+v", item)
 		}
-		byKey[item.Key] = item.Site
+		bySite[item.Site] = item.Preview
 	}
-	if byKey["cbp_aaa"] != "global" || byKey["cbp_bbb"] != "domestic" {
-		t.Fatalf("apiKeys=%v", byKey)
+	if bySite["global"] == "" || bySite["domestic"] == "" {
+		t.Fatalf("apiKeys=%v", bySite)
+	}
+
+	// reveal 端点返回完整密钥（仍需鉴权）。
+	reveal := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:32126/direct-admin/api/client-config/reveal", nil)
+	revealRec := httptest.NewRecorder()
+	srv.HTTP.Handler.ServeHTTP(revealRec, reveal)
+	if revealRec.Code != http.StatusOK {
+		t.Fatalf("reveal status=%d body=%s", revealRec.Code, revealRec.Body.String())
+	}
+	var revealed struct {
+		APIKey  string `json:"apiKey"`
+		APIKeys []struct {
+			Site string `json:"site"`
+			Key  string `json:"key"`
+		} `json:"apiKeys"`
+	}
+	if err := json.Unmarshal(revealRec.Body.Bytes(), &revealed); err != nil {
+		t.Fatal(err)
+	}
+	if revealed.APIKey != "cbp_primary" {
+		t.Fatalf("reveal apiKey=%q", revealed.APIKey)
+	}
+	full := map[string]string{}
+	for _, item := range revealed.APIKeys {
+		full[item.Site] = item.Key
+	}
+	if full["global"] != "cbp_aaa" || full["domestic"] != "cbp_bbb" {
+		t.Fatalf("reveal apiKeys=%v", full)
 	}
 }
 
@@ -810,25 +845,21 @@ func TestGenerateAndDeleteBoundAPIKey(t *testing.T) {
 	var generated struct {
 		OK      bool   `json:"ok"`
 		APIKey  string `json:"apiKey"`
-		APIKeys []struct {
+		Created struct {
 			Site string `json:"site"`
 			Key  string `json:"key"`
-		} `json:"apiKeys"`
+		} `json:"created"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &generated); err != nil {
 		t.Fatal(err)
 	}
-	if generated.APIKey != "cbp_primary" {
-		t.Fatalf("primary apiKey mutated: %q", generated.APIKey)
+	// H2：主 Key 列表掩码；新 Key 走 created 反查返回值。
+	if generated.APIKey != "" {
+		t.Fatalf("primary apiKey must be masked in list payload: %q", generated.APIKey)
 	}
-	newKey := ""
-	for _, item := range generated.APIKeys {
-		if item.Key != "cbp_old" {
-			newKey = item.Key
-		}
-	}
-	if newKey == "" || !strings.HasPrefix(newKey, "cbp_") {
-		t.Fatalf("missing generated bound key: %+v", generated.APIKeys)
+	newKey := generated.Created.Key
+	if generated.Created.Site != "domestic" || newKey == "" || !strings.HasPrefix(newKey, "cbp_") {
+		t.Fatalf("created bound key shape=%+v", generated.Created)
 	}
 
 	envRaw, err := os.ReadFile(envPath)
@@ -859,7 +890,8 @@ func TestGenerateAndDeleteBoundAPIKey(t *testing.T) {
 		t.Fatal("primary key should still authenticate")
 	}
 
-	del := httptest.NewRequest(http.MethodDelete, "http://127.0.0.1:32126/direct-admin/api/client-config/bound-keys", strings.NewReader(`{"key":"`+newKey+`"}`))
+	// H2：按站点删除（不再回传密钥定位）。
+	del := httptest.NewRequest(http.MethodDelete, "http://127.0.0.1:32126/direct-admin/api/client-config/bound-keys", strings.NewReader(`{"site":"domestic"}`))
 	del.Header.Set("Content-Type", "application/json")
 	delRec := httptest.NewRecorder()
 	srv.HTTP.Handler.ServeHTTP(delRec, del)

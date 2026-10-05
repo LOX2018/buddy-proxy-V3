@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 )
@@ -211,8 +212,9 @@ func readJSONLimited(r *http.Request, dst any, limit int64) error {
 	return decoder.Decode(dst)
 }
 
-func BearerToken(r *http.Request) string {
-	auth := strings.TrimSpace(r.Header.Get("Authorization"))
+// BearerFromHeader 从指定请求头解析 Bearer token（值、大小写均宽松）。
+func BearerFromHeader(r *http.Request, header string) string {
+	auth := strings.TrimSpace(r.Header.Get(header))
 	if auth == "" {
 		return ""
 	}
@@ -225,17 +227,55 @@ func BearerToken(r *http.Request) string {
 	return ""
 }
 
+func BearerToken(r *http.Request) string {
+	return BearerFromHeader(r, "Authorization")
+}
+
+// SameOriginRedirectPolicy 作为 http.Client.CheckRedirect 使用：
+// 只允许同 scheme + 同 host 的重定向；跨域重定向返回原始 3xx 响应
+// （ErrUseLastResponse），避免上游被劫持后把凭据/敏感请求转发到陌生主机。
+func SameOriginRedirectPolicy(req *http.Request, via []*http.Request) error {
+	if len(via) == 0 || req.URL == nil || via[0].URL == nil {
+		return nil
+	}
+	prev := via[0].URL
+	if !strings.EqualFold(req.URL.Scheme, prev.Scheme) || !strings.EqualFold(req.URL.Host, prev.Host) {
+		return http.ErrUseLastResponse
+	}
+	return nil
+}
+
+// TrustForwardedHeaders 报告是否信任 X-Forwarded-* 头，默认 false。
+// 只有显式设置 CODEBUDDY_PROXY_TRUST_FORWARDED=true（或 CURSOR_DIRECT 别名）
+// 且确信上游代理会重写这些头时才应开启，防止伪造 Host/Proto 影响鉴权与回调地址。
+func TrustForwardedHeaders() bool {
+	return forwardedTrue("CODEBUDDY_PROXY_TRUST_FORWARDED") || forwardedTrue("CURSOR_DIRECT_TRUST_FORWARDED")
+}
+
+func forwardedTrue(key string) bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(key))) {
+	case "1", "true", "yes", "on":
+		return true
+	}
+	return false
+}
+
 func PublicOrigin(r *http.Request, configured string) string {
 	if configured != "" {
 		return strings.TrimRight(configured, "/")
 	}
 	scheme := "http"
-	if r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https") {
+	if r.TLS != nil {
 		scheme = "https"
 	}
-	host := r.Header.Get("X-Forwarded-Host")
-	if host == "" {
-		host = r.Host
+	host := r.Host
+	if TrustForwardedHeaders() {
+		if strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https") {
+			scheme = "https"
+		}
+		if fwd := strings.TrimSpace(r.Header.Get("X-Forwarded-Host")); fwd != "" {
+			host = fwd
+		}
 	}
 	return scheme + "://" + host
 }

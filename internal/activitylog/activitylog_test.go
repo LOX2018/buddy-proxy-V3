@@ -165,7 +165,7 @@ func TestNewDayResetKeepsOnlyToday(t *testing.T) {
 	}
 }
 
-func TestTailClearsStalePreviousDayFile(t *testing.T) {
+func TestTailDoesNotMutateStalePreviousDayFile(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "activity.log")
 	l, err := New(path)
@@ -181,17 +181,21 @@ func TestTailClearsStalePreviousDayFile(t *testing.T) {
 	if err := os.Chtimes(path, stale, stale); err != nil {
 		t.Fatalf("Chtimes: %v", err)
 	}
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
 
 	entries, size, err := Tail(path, 10)
 	if err != nil {
 		t.Fatalf("Tail: %v", err)
 	}
-	if len(entries) != 0 || size != 0 {
-		t.Fatalf("stale file should be cleared: entries=%d size=%d", len(entries), size)
+	if len(entries) == 0 || size <= 0 {
+		t.Fatalf("stale file should still be readable: entries=%d size=%d", len(entries), size)
 	}
-	raw, _ := os.ReadFile(path)
-	if strings.TrimSpace(string(raw)) != "" {
-		t.Fatalf("file should be truncated, got %q", raw)
+	after, _ := os.ReadFile(path)
+	if string(after) != string(before) {
+		t.Fatalf("Tail must be read-only, file mutated: before=%q after=%q", before, after)
 	}
 }
 
