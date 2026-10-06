@@ -7,19 +7,19 @@
 
 ---
 
-## dev · 模型白名单支持国内 / 国际分区覆盖
+## dev · 模型禁用列表（纯 deny）+ 活动日志补全
 
 ### 改动
 
-- **模型白名单支持按区域独立配置。** 策略文件新增 `domestic` / `global` 分区，各自可设置独立的 `allow` / `deny` 列表。分区 `allow` 非空时覆盖全局 `allow`，分区 `deny` 累加全局 `deny`；不设分区时行为与原先一致。`GET /v1/models` 和 `/v1/chat/completions` 均按当前请求区域生效。管理台新增国内 / 国际 allow / deny 编辑区，保存后立即热加载。
+- **取消全局 allow，改为纯 deny 模式。** 策略文件仅保留 `deny` 字段，国内/国际分区各自独立 `deny`，互不污染。全局 `deny` 对两区同时生效；分区 `deny` 仅影响对应区域。`auto` / `default` 始终放行。
+- **活动日志补全**：Chat 请求错误（429 限流、配额耗尽、11128 等）写入 `~/.codebuddy/activity/activity.log`，kind 为 `chat-error`
 
 ```json
 {
   "enabled": true,
-  "allow": ["hy3", "gpt-5"],
-  "deny":  ["glm-5.2"],
-  "domestic": { "allow": ["hy3", "hy4-preview"] },
-  "global":   { "allow": ["gpt-5", "deepseek-v4.1-flash"] }
+  "deny": ["glm-5.2"],
+  "domestic": { "deny": ["cn-only-bad"] },
+  "global":   { "deny": ["intl-only-bad"] }
 }
 ```
 

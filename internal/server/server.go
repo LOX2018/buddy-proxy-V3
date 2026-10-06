@@ -1065,7 +1065,6 @@ func (s *Server) handleAdminAPI(w http.ResponseWriter, r *http.Request, path str
 			"path":     s.Svc.ModelPolicy.Path(),
 			"policy":   pol,
 			"enabled":  pol.Enabled,
-			"allow":    pol.Allow,
 			"deny":     pol.Deny,
 			"domestic": pol.Domestic,
 			"global":   pol.Global,
@@ -1074,7 +1073,6 @@ func (s *Server) handleAdminAPI(w http.ResponseWriter, r *http.Request, path str
 	case path == "/direct-admin/api/system/model-policy" && r.Method == http.MethodPut:
 		var body struct {
 			Enabled  bool                  `json:"enabled"`
-			Allow    []string              `json:"allow"`
 			Deny     []string              `json:"deny"`
 			Domestic modelpolicy.SiteRules `json:"domestic"`
 			Global   modelpolicy.SiteRules `json:"global"`
@@ -1083,18 +1081,17 @@ func (s *Server) handleAdminAPI(w http.ResponseWriter, r *http.Request, path str
 			httputil.WriteJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "invalid JSON body"})
 			return
 		}
-		pol := modelpolicy.Policy{Enabled: body.Enabled, Allow: body.Allow, Deny: body.Deny, Domestic: body.Domestic, Global: body.Global}
+		pol := modelpolicy.Policy{Enabled: body.Enabled, Deny: body.Deny, Domestic: body.Domestic, Global: body.Global}
 		if err := s.Svc.ModelPolicy.Write(pol); err != nil {
 			httputil.WriteJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
 			return
 		}
-		s.LogActivity("model-policy-update", map[string]any{"enabled": pol.Enabled, "allowCount": len(pol.Allow)})
+		s.LogActivity("model-policy-update", map[string]any{"enabled": pol.Enabled, "denyCount": len(pol.Deny)})
 		httputil.WriteJSON(w, http.StatusOK, map[string]any{
 			"ok":       true,
 			"path":     s.Svc.ModelPolicy.Path(),
 			"policy":   pol,
 			"enabled":  pol.Enabled,
-			"allow":    pol.Allow,
 			"deny":     pol.Deny,
 			"domestic": pol.Domestic,
 			"global":   pol.Global,

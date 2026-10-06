@@ -25,7 +25,6 @@ func TestLoadOrCreateAndSave(t *testing.T) {
 	}
 
 	p.Enabled = true
-	p.Allow = []string{"  hy3  ", "codebuddy/hy4-preview", "", "auto"}
 	p.Deny = []string{"glm-5.3-flash"}
 	if err := p.Save(path); err != nil {
 		t.Fatalf("Save: %v", err)
@@ -39,11 +38,11 @@ func TestLoadOrCreateAndSave(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if !loaded.Enabled || len(loaded.Allow) != 3 || len(loaded.Deny) != 1 {
+	if !loaded.Enabled || len(loaded.Deny) != 1 {
 		t.Fatalf("unexpected loaded policy: %+v", loaded)
 	}
-	if loaded.Allow[0] != "hy3" || loaded.Allow[1] != "hy4-preview" || loaded.Allow[2] != "auto" {
-		t.Fatalf("allow normalized wrong: %+v", loaded.Allow)
+	if loaded.Deny[0] != "glm-5.3-flash" {
+		t.Fatalf("deny normalized wrong: %+v", loaded.Deny)
 	}
 }
 
@@ -56,21 +55,16 @@ func TestRejectReasonBehavior(t *testing.T) {
 		expect bool // true=allowed
 	}{
 		{"disabled allows all", Policy{}, "deepseek-v4.1-flash", "", true},
-		{"empty allow list allows", Policy{Enabled: true}, "hy3", "", true},
-		{"in allow list", Policy{Enabled: true, Allow: []string{"hy3", "hy4-preview"}}, "hy4-preview", "", true},
-		{"not in allow list", Policy{Enabled: true, Allow: []string{"hy3"}}, "glm-5", "", false},
-		{"auto always allowed", Policy{Enabled: true, Allow: []string{"hy3"}}, "auto", "", true},
+		{"empty deny allows", Policy{Enabled: true}, "hy3", "", true},
+		{"in deny list", Policy{Enabled: true, Deny: []string{"glm-5"}}, "glm-5", "", false},
+		{"auto always allowed", Policy{Enabled: true, Deny: []string{"hy3"}}, "auto", "", true},
 		{"denied", Policy{Enabled: true, Deny: []string{"glm"}}, "glm", "", false},
-		{"deny overrides allow", Policy{Enabled: true, Allow: []string{"glm"}, Deny: []string{"glm"}}, "glm", "", false},
-		{"domestic allow overrides global", Policy{Enabled: true, Allow: []string{"gpt-5"}, Domestic: SiteRules{Allow: []string{"hy3"}}}, "hy3", "domestic", true},
-		{"domestic allow excludes global-only", Policy{Enabled: true, Allow: []string{"gpt-5"}, Domestic: SiteRules{Allow: []string{"hy3"}}}, "gpt-5", "domestic", false},
-		{"domestic deny overrides global allow", Policy{Enabled: true, Allow: []string{"hy3"}, Domestic: SiteRules{Deny: []string{"hy3"}}}, "hy3", "domestic", false},
-		{"domestic deny does not affect global", Policy{Enabled: true, Allow: []string{"hy3"}, Domestic: SiteRules{Deny: []string{"hy3"}}}, "hy3", "global", true},
-		{"global allow works", Policy{Enabled: true, Allow: []string{"hy3"}, Global: SiteRules{Allow: []string{"gpt-5"}}}, "gpt-5", "global", true},
-		{"global allow excludes global-only", Policy{Enabled: true, Allow: []string{"hy3"}, Global: SiteRules{Allow: []string{"gpt-5"}}}, "hy3", "global", false},
-		{"site empty allow falls back to global", Policy{Enabled: true, Allow: []string{"hy3"}}, "hy3", "domestic", true},
-		{"site empty allow falls back to global 2", Policy{Enabled: true, Allow: []string{"hy3"}}, "hy3", "global", true},
-		{"cn alias works", Policy{Enabled: true, Allow: []string{"gpt-5"}, Domestic: SiteRules{Allow: []string{"hy3"}}}, "hy3", "cn", true},
+		{"domestic deny extends global", Policy{Enabled: true, Deny: []string{"global-model"}, Domestic: SiteRules{Deny: []string{"domestic-model"}}}, "domestic-model", "domestic", false},
+		{"domestic deny isolated to domestic", Policy{Enabled: true, Deny: []string{"global-model"}, Domestic: SiteRules{Deny: []string{"domestic-model"}}}, "domestic-model", "global", true},
+		{"global deny works", Policy{Enabled: true, Deny: []string{"hy3"}, Global: SiteRules{Deny: []string{"gpt-5"}}}, "gpt-5", "global", false},
+		{"global deny isolated to global", Policy{Enabled: true, Deny: []string{"hy3"}, Global: SiteRules{Deny: []string{"gpt-5"}}}, "gpt-5", "domestic", true},
+		{"cn alias works", Policy{Enabled: true, Deny: []string{"domestic-model"}, Domestic: SiteRules{Deny: []string{"domestic-model"}}}, "domestic-model", "cn", false},
+		{"both sites denied same model", Policy{Enabled: true, Deny: []string{"common-bad"}, Domestic: SiteRules{Deny: []string{"domestic-bad"}}, Global: SiteRules{Deny: []string{"global-bad"}}}, "common-bad", "domestic", false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -84,7 +78,7 @@ func TestRejectReasonBehavior(t *testing.T) {
 func TestFilterKeepsAuto(t *testing.T) {
 	pol := Policy{
 		Enabled: true,
-		Allow:   []string{"hy3"},
+		Deny:    []string{"glm"},
 	}
 	type fake struct{ ID string }
 	fakes := []fake{{"auto"}, {"hy3"}, {"glm"}}

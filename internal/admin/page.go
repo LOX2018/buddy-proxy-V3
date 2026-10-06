@@ -719,25 +719,21 @@ pre{
       <div class="panel-inner">
         <div class="section-head">
           <div>
-            <h2>模型白名单</h2>
-            <p>写入 <code>~/.codebuddy/proxy-modelpolicy.json</code>。开启后仅允许列表内模型：公开 <code>/v1/models</code> 只返回白名单模型，<code>/v1/chat/completions</code> 对白名单外模型直接拒绝。<code>auto</code> 始终可用；管理台仍显示完整编目。每行一个模型 ID。</p>
+            <h2>模型禁用列表</h2>
+            <p>写入 <code>~/.codebuddy/proxy-modelpolicy.json</code>。开启后对禁用列表内的模型直接拒绝：公开 <code>/v1/models</code> 隐藏该模型，<code>/v1/chat/completions</code> 返回 4xx。<code>auto</code> 始终可用；管理台仍显示完整编目。每行一个模型 ID。国内/国际可分别追加禁用，全局与分区 deny 累加生效。</p>
           </div>
         </div>
         <div class="policy-switch">
           <label class="toggle">
             <input type="checkbox" id="mpEnabled"/>
-            <span>启用模型白名单</span>
+            <span>启用模型禁用</span>
           </label>
           <span class="meta-line" id="mpStatus">—</span>
         </div>
         <div class="field-grid">
           <div>
-            <label for="mpAllow">全局允许列表（allow）</label>
-            <textarea id="mpAllow" rows="6" spellcheck="false" placeholder="hy3&#10;hy4-preview&#10;"></textarea>
-          </div>
-          <div>
-            <label for="mpDeny">全局禁用列表（deny，可选）</label>
-            <textarea id="mpDeny" rows="6" spellcheck="false" placeholder="glm-5.3-flash"></textarea>
+            <label for="mpDeny">全局禁用列表</label>
+            <textarea id="mpDeny" rows="6" spellcheck="false" placeholder="glm-5.3-flash&#10;old-model"></textarea>
           </div>
         </div>
         <div class="section-head" style="margin-top:20px;border:none;padding:0">
@@ -745,12 +741,8 @@ pre{
         </div>
         <div class="field-grid">
           <div>
-            <label for="mpDomAllow">国内允许列表（覆盖全局）</label>
-            <textarea id="mpDomAllow" rows="4" spellcheck="false" placeholder="hy3&#10;hy4-preview&#10;"></textarea>
-          </div>
-          <div>
-            <label for="mpDomDeny">国内禁用列表（可选）</label>
-            <textarea id="mpDomDeny" rows="4" spellcheck="false" placeholder="glm-5.3-flash"></textarea>
+            <label for="mpDomDeny">国内额外禁用列表</label>
+            <textarea id="mpDomDeny" rows="4" spellcheck="false" placeholder="glm-5.2"></textarea>
           </div>
         </div>
         <div class="section-head" style="margin-top:20px;border:none;padding:0">
@@ -758,16 +750,12 @@ pre{
         </div>
         <div class="field-grid">
           <div>
-            <label for="mpGlbAllow">国际允许列表（覆盖全局）</label>
-            <textarea id="mpGlbAllow" rows="4" spellcheck="false" placeholder="gpt-5&#10;deepseek-v4.1-flash&#10;"></textarea>
-          </div>
-          <div>
-            <label for="mpGlbDeny">国际禁用列表（可选）</label>
-            <textarea id="mpGlbDeny" rows="4" spellcheck="false" placeholder="glm-5.3-flash"></textarea>
+            <label for="mpGlbDeny">国际额外禁用列表</label>
+            <textarea id="mpGlbDeny" rows="4" spellcheck="false" placeholder="deepseek-v4.1-flash"></textarea>
           </div>
         </div>
         <div class="actions">
-          <button class="primary" id="btnSavePolicy" type="button">保存白名单</button>
+          <button class="primary" id="btnSavePolicy" type="button">保存禁用列表</button>
           <button class="ghost" id="btnResetPolicy" type="button">重读</button>
         </div>
       </div>
@@ -2165,15 +2153,12 @@ $('btnOpenConfigDir').onclick = function(){
 refreshActivity().catch(function(){});
 refreshErrors().catch(function(){});
 
-/* 模型白名单 (Tab 04) */
+/* 模型禁用列表 (Tab 04) */
 async function loadModelPolicy(){
   const data = await api('/direct-admin/api/system/model-policy');
   $('mpEnabled').checked = !!data.enabled;
-  $('mpAllow').value = (data.allow || []).join('\n');
   $('mpDeny').value = (data.deny || []).join('\n');
-  $('mpDomAllow').value = ((data.domestic || {}).allow || []).join('\n');
   $('mpDomDeny').value = ((data.domestic || {}).deny || []).join('\n');
-  $('mpGlbAllow').value = ((data.global || {}).allow || []).join('\n');
   $('mpGlbDeny').value = ((data.global || {}).deny || []).join('\n');
   $('mpStatus').textContent = (data.path || '') + (data.enabled ? ' · 已启用' : ' · 未启用');
 }
@@ -2181,14 +2166,11 @@ async function saveModelPolicy(){
   const parseList = function(el){ return el.value.split('\n').map(function(s){ return s.trim(); }).filter(Boolean); };
   const body = {
     enabled: $('mpEnabled').checked,
-    allow: parseList($('mpAllow')),
     deny: parseList($('mpDeny')),
     domestic: {
-      allow: parseList($('mpDomAllow')),
       deny: parseList($('mpDomDeny'))
     },
     global: {
-      allow: parseList($('mpGlbAllow')),
       deny: parseList($('mpGlbDeny'))
     }
   };
@@ -2200,14 +2182,11 @@ async function saveModelPolicy(){
   const d = await res.json().catch(function(){ return {}; });
   if (!res.ok) throw new Error(d.error || ('HTTP ' + res.status));
   $('mpEnabled').checked = !!d.enabled;
-  $('mpAllow').value = (d.allow || []).join('\n');
   $('mpDeny').value = (d.deny || []).join('\n');
-  $('mpDomAllow').value = ((d.domestic || {}).allow || []).join('\n');
   $('mpDomDeny').value = ((d.domestic || {}).deny || []).join('\n');
-  $('mpGlbAllow').value = ((d.global || {}).allow || []).join('\n');
   $('mpGlbDeny').value = ((d.global || {}).deny || []).join('\n');
   $('mpStatus').textContent = (d.path || '') + (d.enabled ? ' · 已启用' : ' · 未启用');
-  showToast(d.enabled ? '白名单已保存并启用' : '白名单已保存（未启用）');
+  showToast(d.enabled ? '禁用列表已保存并启用' : '禁用列表已保存（未启用）');
 }
 $('btnSavePolicy').onclick = function(){ saveModelPolicy().catch(function(e){ showToast(e.message, 'error'); }); };
 $('btnResetPolicy').onclick = function(){ loadModelPolicy().catch(function(e){ showToast(e.message, 'error'); }); };

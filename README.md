@@ -178,34 +178,29 @@ CODEBUDDY_PRODUCT=codebuddy      # 或 workbuddy
 
 ---
 
-## 🗂️ 模型白名单
+## 🗂️ 模型禁用列表
 
 策略文件 `~/.codebuddy/proxy-modelpolicy.json`（可用环境变量 `CODEBUDDY_PROXY_MODELPOLICY_PATH` 指定路径）：
 
 ```json
 {
   "enabled": true,
-  "allow": ["hy3", "hy4-preview", "glm-5.3-flash"],
-  "deny":  ["glm-5.2"],
+  "deny": ["glm-5.2", "old-model"],
   "domestic": {
-    "allow": ["hy3", "hy4-preview"],
-    "deny":  ["glm-5.2"]
+    "deny": ["glm-5.2", "cn-only-bad"]
   },
   "global": {
-    "allow": ["gpt-5", "deepseek-v4.1-flash"],
-    "deny":  []
+    "deny": ["deepseek-v4.1-flash", "intl-only-bad"]
   }
 }
 ```
 
-规则（优先级：enabled > auto/default > deny > allow）：
+规则（优先级：enabled > auto/default > deny）：
 
 - `enabled: false` → 不限制
 - **deny 命中** → 拒绝该模型（目录隐藏、请求 4xx）
-- **allow 非空且未命中** → 拒绝，并提示当前白名单
-- `allow` 为空 → 仅 `deny` 生效
 - `auto` / `default` 始终放行
-- **分区覆盖**：`domestic` / `global` 各自可独立设置 `allow` / `deny`；分区 `allow` 非空时**覆盖**全局 `allow`，分区 `deny` **累加**全局 `deny`
+- **分区隔离**：`domestic` / `global` 各自独立设置 `deny`，**不污染另一区**；全局 `deny` 对两区同时生效
 
 文件改动即时生效（mtime 感知热加载），无需重启。批量过滤与单请求判定共用同一份策略。
 
