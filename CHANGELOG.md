@@ -7,19 +7,23 @@
 
 ---
 
-## dev · 模型禁用列表（纯 deny）+ 活动日志补全
+## dev · 模型白名单分区覆盖（allow 模式）+ UI 布局优化
 
 ### 改动
 
-- **取消全局 allow，改为纯 deny 模式。** 策略文件仅保留 `deny` 字段，国内/国际分区各自独立 `deny`，互不污染。全局 `deny` 对两区同时生效；分区 `deny` 仅影响对应区域。`auto` / `default` 始终放行。
-- **活动日志补全**：Chat 请求错误（429 限流、配额耗尽、11128 等）写入 `~/.codebuddy/activity/activity.log`，kind 为 `chat-error`
+- **模型白名单恢复为纯 allow 模式。** 策略文件仅保留 `allow` 字段，国内/国际分区各自独立 `allow`，分区 `allow` 非空时覆盖全局 `allow`；不设分区时行为与原先一致。`GET /v1/models` 和 `/v1/chat/completions` 均按当前请求区域生效。
+- **管理台 UI 布局优化：** 全局/国内/国际三个白名单编辑区改为同一行三列布局。
+- **活动日志补全：** Chat 请求错误（429 限流、配额耗尽、11128 等）写入 `~/.codebuddy/activity/activity.log`。
+- **管理台密码锁定收紧：** adminLockout 从 20次/5分钟 → 5次/5分钟。
+- **安全文档补充：** README 新增"不要将管理台端口暴露给公网"警告。
+- **托盘版 PE 头修复：** GUI 子系统从 CUI（2）→ GUI（1），不再弹出 CMD 黑窗口。
 
 ```json
 {
   "enabled": true,
-  "deny": ["glm-5.2"],
-  "domestic": { "deny": ["cn-only-bad"] },
-  "global":   { "deny": ["intl-only-bad"] }
+  "allow": ["hy3", "gpt-5"],
+  "domestic": { "allow": ["hy3", "hy4-preview"] },
+  "global":   { "allow": ["gpt-5", "deepseek-v4.1-flash"] }
 }
 ```
 
