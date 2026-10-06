@@ -1102,7 +1102,7 @@ func TestModelPolicyAdminAPI(t *testing.T) {
 	}
 
 	putReq := httptest.NewRequest(http.MethodPut, "http://127.0.0.1:32126/direct-admin/api/system/model-policy",
-		strings.NewReader(`{"enabled":true,"deny":["gpt-5"],"domestic":{"deny":["hy3"]},"global":{"deny":["deepseek-v4.1-flash"]}}`))
+		strings.NewReader(`{"enabled":true,"allow":["gpt-5"],"domestic":{"allow":["hy3"]},"global":{"allow":["deepseek-v4.1-flash"]}}`))
 	putReq.Header.Set("Content-Type", "application/json")
 	putReq.Header.Set("Origin", "http://127.0.0.1:32126")
 	putReq.Host = "127.0.0.1:32126"
@@ -1120,14 +1120,14 @@ func TestModelPolicyAdminAPI(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(pol.Deny) != 1 || pol.Deny[0] != "gpt-5" {
-		t.Fatalf("deny=%v", pol.Deny)
+	if len(pol.Allow) != 1 || pol.Allow[0] != "gpt-5" {
+		t.Fatalf("allow=%v", pol.Allow)
 	}
-	if len(pol.Domestic.Deny) != 1 || pol.Domestic.Deny[0] != "hy3" {
-		t.Fatalf("domestic deny=%v", pol.Domestic.Deny)
+	if len(pol.Domestic.Allow) != 1 || pol.Domestic.Allow[0] != "hy3" {
+		t.Fatalf("domestic allow=%v", pol.Domestic.Allow)
 	}
-	if len(pol.Global.Deny) != 1 || pol.Global.Deny[0] != "deepseek-v4.1-flash" {
-		t.Fatalf("global deny=%v", pol.Global.Deny)
+	if len(pol.Global.Allow) != 1 || pol.Global.Allow[0] != "deepseek-v4.1-flash" {
+		t.Fatalf("global allow=%v", pol.Global.Allow)
 	}
 }
 
@@ -1139,9 +1139,8 @@ func TestModelPolicyFiltersCatalog(t *testing.T) {
 
 	if err := srv.Svc.ModelPolicy.Write(modelpolicy.Policy{
 		Enabled:  true,
-		Deny:     []string{"deepseek-v4.1-flash"},
-		Domestic: modelpolicy.SiteRules{Deny: []string{"deepseek-v4.1-flash"}},
-		Global:   modelpolicy.SiteRules{Deny: []string{"deepseek-v4.1-flash"}},
+		Allow:    []string{"gpt-5"},
+		Global:   modelpolicy.SiteRules{Allow: []string{"gpt-5"}},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -1154,18 +1153,20 @@ func TestModelPolicyFiltersCatalog(t *testing.T) {
 		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 	}
 	ids := modelIDsFromList(t, rec.Body.Bytes())
-	if containsID(ids, "deepseek-v4.1-flash") {
-		t.Fatalf("filtered catalog=%v (should exclude deepseek-v4.1-flash)", ids)
+	if !containsID(ids, "gpt-5") || containsID(ids, "deepseek-v4.1-flash") {
+		t.Fatalf("filtered catalog=%v", ids)
 	}
 }
 
 func TestModelPolicyRejectsChat(t *testing.T) {
 	srv := testServer(t, true, "", "secret-key")
+	seedBothSites(t, srv)
+	srv.Svc.Provider.HTTP = &http.Client{Transport: &recordingUpstreamTransport{}}
 	t.Setenv("CODEBUDDY_PROXY_ENV_FILE", filepath.Join(t.TempDir(), ".env"))
 	if err := srv.Svc.ModelPolicy.Write(modelpolicy.Policy{
 		Enabled:  true,
-		Deny:     []string{"gpt-5"},
-		Domestic: modelpolicy.SiteRules{Deny: []string{"hy3"}},
+		Allow:    []string{"gpt-5"},
+		Domestic: modelpolicy.SiteRules{Allow: []string{"hy3"}},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -1183,8 +1184,12 @@ func TestModelPolicyRejectsChat(t *testing.T) {
 		return rec
 	}
 
-	// hy3 is denied in domestic only.
-	if rec := mk("hy3", "domestic"); rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "已被禁用") {
+	// hy3 is allowed only in domestic (site-specific allow overrides global allow).
+	if rec := mk("hy3", "domestic"); rec.Code != http.StatusOK {
+		t.Fatalf("domestic allowed status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	// gpt-5 (global allow) is rejected in domestic.
+	if rec := mk("gpt-5", "domestic"); rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "白名单") {
 		t.Fatalf("domestic blocked status=%d body=%s", rec.Code, rec.Body.String())
 	}
 }

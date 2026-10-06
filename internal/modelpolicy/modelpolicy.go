@@ -4,13 +4,14 @@
 //
 //	{
 //	  "enabled": true,
-//	  "deny": ["glm-5.3-flash"],
-//	  "domestic": {"deny": ["glm-5.2"]},
-//	  "global":   {"deny": ["deepseek-v4.1-flash"]}
+//	  "allow": ["hy3", "hy4-preview"],
+//	  "domestic": {"allow": ["hy3"]},
+//	  "global":   {"allow": ["gpt-5"]}
 //	}
 //
-// 规则：enabled 关 → 不限制；deny 命中 → 拒绝（优先）。
-// auto/default 始终放行。分区 deny 累加全局 deny。
+// 规则：enabled 关 → 不限制；allow 非空且未命中 → 拒绝；
+// allow 为空 → 全放行。auto/default 始终放行。
+// 分区 allow 非空时覆盖全局 allow。
 package modelpolicy
 
 import (
@@ -29,15 +30,15 @@ import (
 // DefaultFileName 是策略文件名（默认目录为 ~/.codebuddy）。
 const DefaultFileName = "proxy-modelpolicy.json"
 
-// SiteRules 是单区域（domestic / global）的独立禁用规则。
+// SiteRules 是单区域（domestic / global）的独立白名单规则。
 type SiteRules struct {
-	Deny []string `json:"deny,omitempty"`
+	Allow []string `json:"allow,omitempty"`
 }
 
 // Policy 是模型白名单配置。
 type Policy struct {
 	Enabled  bool      `json:"enabled"`
-	Deny     []string  `json:"deny,omitempty"`
+	Allow    []string  `json:"allow,omitempty"`
 	Domestic SiteRules `json:"domestic,omitempty"`
 	Global   SiteRules `json:"global,omitempty"`
 }
@@ -168,7 +169,7 @@ func (m *Manager) reloadLocked() error {
 }
 
 // RejectReason 返回拒绝原因；允许时返回空串。
-// site 为空时仅使用全局 deny；"domestic" 或 "global" 时叠加分区 deny。
+// site 为空时仅使用全局 allow；"domestic" 或 "global" 时分区 allow 覆盖全局。
 func (p Policy) RejectReason(publicID, site string) string {
 	id := models.PublicModelID(publicID)
 	if !p.Enabled {
@@ -178,11 +179,17 @@ func (p Policy) RejectReason(publicID, site string) string {
 	if id == "" || lower == "auto" || lower == "default" {
 		return ""
 	}
-	denied := p.set(append(append([]string{}, p.Deny...), p.siteDeny(site)...))
-	if _, isDenied := denied[lower]; isDenied {
-		return "模型 " + id + " 已被禁用"
+	allow := p.effectiveAllow(site)
+	if len(allow) == 0 {
+		return ""
 	}
-	return ""
+	if _, ok := p.set(allow)[lower]; ok {
+		return ""
+	}
+	if len(allow) == 1 {
+		return "模型 " + id + " 不在白名单，仅允许 " + allow[0]
+	}
+	return "模型 " + id + " 不在白名单，仅允许 " + strings.Join(allow, "、")
 }
 
 // Allowed 报告公开模型 id 在给定区域是否允许。
@@ -195,38 +202,41 @@ func (p Policy) Filter(list []models.Model, site string) (kept []models.Model, d
 	if !p.Enabled {
 		return list, 0
 	}
-	denied := p.set(append(append([]string{}, p.Deny...), p.siteDeny(site)...))
+	allow := p.set(p.effectiveAllow(site))
 	for _, m := range list {
 		id := strings.ToLower(models.PublicModelID(m.ID))
-		if _, bad := denied[id]; bad {
-			dropped++
-			continue
-		}
-		if id == "auto" || id == "default" {
+		if id == "auto" || id == "default" || len(allow) == 0 {
 			kept = append(kept, m)
 			continue
 		}
-		kept = append(kept, m)
+		if _, ok := allow[id]; ok {
+			kept = append(kept, m)
+			continue
+		}
+		dropped++
 	}
 	return kept, dropped
 }
 
 func (p *Policy) normalize() {
-	p.Deny = cleanIDs(p.Deny)
-	p.Domestic.Deny = cleanIDs(p.Domestic.Deny)
-	p.Global.Deny = cleanIDs(p.Global.Deny)
+	p.Allow = cleanIDs(p.Allow)
+	p.Domestic.Allow = cleanIDs(p.Domestic.Allow)
+	p.Global.Allow = cleanIDs(p.Global.Allow)
 }
 
-// siteDeny 返回指定区域的额外 deny 列表。
-func (p *Policy) siteDeny(site string) []string {
+// effectiveAllow 返回指定区域的生效 allow：分区 allow 非空时覆盖全局，否则用全局。
+func (p *Policy) effectiveAllow(site string) []string {
 	switch strings.ToLower(strings.TrimSpace(site)) {
 	case "domestic", "cn":
-		return p.Domestic.Deny
+		if len(p.Domestic.Allow) > 0 {
+			return p.Domestic.Allow
+		}
 	case "global", "intl":
-		return p.Global.Deny
-	default:
-		return nil
+		if len(p.Global.Allow) > 0 {
+			return p.Global.Allow
+		}
 	}
+	return p.Allow
 }
 
 func (p Policy) set(list []string) map[string]struct{} {
