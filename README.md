@@ -288,6 +288,7 @@ make release   # 四平台交叉编译 + SHA256SUMS.txt
 - 管理台密码与 API Key 分开管理
 - 定期备份账号池 JSON，但注意其中包含凭据
 - 建议一进程一份 `proxy-accounts.json`；加号优先走管理台
+- **不要将管理台端口暴露给公网**，如有需要请使用 VPN 或防火墙限制访问
 
 漏洞报告请勿开公开 issue，见 [SECURITY.md](SECURITY.md)。
 

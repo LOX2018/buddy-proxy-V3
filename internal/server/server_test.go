@@ -546,6 +546,66 @@ func TestAdminPasswordRequiredWhenConfigured(t *testing.T) {
 	}
 }
 
+func TestAdminLockoutAfterFailedAttempts(t *testing.T) {
+	srv := testServer(t, false, "admin-pass", "")
+	// 连续失败 5 次（当前阈值）触发锁定。
+	for i := 0; i < 5; i++ {
+		req := httptest.NewRequest(http.MethodGet, "http://127.0.0.1:32126/direct-admin/api/status", nil)
+		req.SetBasicAuth("admin", "wrong-pass")
+		rec := httptest.NewRecorder()
+		srv.HTTP.Handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusUnauthorized && rec.Code != http.StatusTooManyRequests {
+			t.Fatalf("attempt %d: unexpected status=%d", i+1, rec.Code)
+		}
+	}
+	// 第 6 次应被锁。
+	req := httptest.NewRequest(http.MethodGet, "http://127.0.0.1:32126/direct-admin/api/status", nil)
+	req.SetBasicAuth("admin", "wrong-pass")
+	rec = httptest.NewRecorder()
+	srv.HTTP.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("lockout status=%d want 429", rec.Code)
+	}
+	// 正确密码可重置锁并放行。
+	req = httptest.NewRequest(http.MethodGet, "http://127.0.0.1:32126/direct-admin/api/status", nil)
+	req.SetBasicAuth("admin", "admin-pass")
+	rec = httptest.NewRecorder()
+	srv.HTTP.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("after correct pass status=%d", rec.Code)
+	}
+}
+
+func TestAdminLockoutAfterFailedAttempts(t *testing.T) {
+	srv := testServer(t, false, "admin-pass", "")
+	// 连续失败 5 次（当前阈值）触发锁定。
+	for i := 0; i < 5; i++ {
+		req := httptest.NewRequest(http.MethodGet, "http://127.0.0.1:32126/direct-admin/api/status", nil)
+		req.SetBasicAuth("admin", "wrong-pass")
+		rec := httptest.NewRecorder()
+		srv.HTTP.Handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusUnauthorized && rec.Code != http.StatusTooManyRequests {
+			t.Fatalf("attempt %d: unexpected status=%d", i+1, rec.Code)
+		}
+	}
+	// 第 6 次应被锁。
+	req := httptest.NewRequest(http.MethodGet, "http://127.0.0.1:32126/direct-admin/api/status", nil)
+	req.SetBasicAuth("admin", "wrong-pass")
+	rec := httptest.NewRecorder()
+	srv.HTTP.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("lockout status=%d want 429", rec.Code)
+	}
+	// 正确密码可重置锁并放行。
+	req = httptest.NewRequest(http.MethodGet, "http://127.0.0.1:32126/direct-admin/api/status", nil)
+	req.SetBasicAuth("admin", "admin-pass")
+	rec = httptest.NewRecorder()
+	srv.HTTP.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("after correct pass status=%d", rec.Code)
+	}
+}
+
 func TestAdminRejectsPasswordQueryParam(t *testing.T) {
 	srv := testServer(t, false, "admin-pass", "")
 	req := httptest.NewRequest(http.MethodGet, "http://127.0.0.1:32126/direct-admin/api/status?password=admin-pass", nil)
@@ -1072,7 +1132,7 @@ func TestModelPolicyAdminAPI(t *testing.T) {
 	}
 
 	putReq := httptest.NewRequest(http.MethodPut, "http://127.0.0.1:32126/direct-admin/api/system/model-policy",
-		strings.NewReader(`{"enabled":true,"allow":["gpt-5"],"deny":[]}`))
+		strings.NewReader(`{"enabled":true,"allow":["gpt-5"],"deny":[],"domestic":{"allow":["hy3"],"deny":["glm-5.3-flash"]},"global":{"allow":["deepseek-v4.1-flash"],"deny":[]}}`))
 	putReq.Header.Set("Content-Type", "application/json")
 	putReq.Header.Set("Origin", "http://127.0.0.1:32126")
 	putReq.Host = "127.0.0.1:32126"
@@ -1093,6 +1153,15 @@ func TestModelPolicyAdminAPI(t *testing.T) {
 	if len(pol.Allow) != 1 || pol.Allow[0] != "gpt-5" {
 		t.Fatalf("allow=%v", pol.Allow)
 	}
+	if len(pol.Domestic.Allow) != 1 || pol.Domestic.Allow[0] != "hy3" {
+		t.Fatalf("domestic allow=%v", pol.Domestic.Allow)
+	}
+	if len(pol.Domestic.Deny) != 1 || pol.Domestic.Deny[0] != "glm-5.3-flash" {
+		t.Fatalf("domestic deny=%v", pol.Domestic.Deny)
+	}
+	if len(pol.Global.Allow) != 1 || pol.Global.Allow[0] != "deepseek-v4.1-flash" {
+		t.Fatalf("global allow=%v", pol.Global.Allow)
+	}
 }
 
 func TestModelPolicyFiltersCatalog(t *testing.T) {
@@ -1101,7 +1170,12 @@ func TestModelPolicyFiltersCatalog(t *testing.T) {
 	srv.Svc.Provider.HTTP = &http.Client{Transport: catalogByHostTransport{}}
 	t.Setenv("CODEBUDDY_PROXY_ENV_FILE", filepath.Join(t.TempDir(), ".env"))
 
-	if err := srv.Svc.ModelPolicy.Write(modelpolicy.Policy{Enabled: true, Allow: []string{"gpt-5"}}); err != nil {
+	if err := srv.Svc.ModelPolicy.Write(modelpolicy.Policy{
+		Enabled:  true,
+		Allow:    []string{"gpt-5"},
+		Domestic: modelpolicy.SiteRules{Allow: []string{"deepseek-v4.1-flash"}},
+		Global:   modelpolicy.SiteRules{Allow: []string{"gpt-5"}},
+	}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1121,21 +1195,28 @@ func TestModelPolicyFiltersCatalog(t *testing.T) {
 func TestModelPolicyRejectsChat(t *testing.T) {
 	srv := testServer(t, true, "", "secret-key")
 	t.Setenv("CODEBUDDY_PROXY_ENV_FILE", filepath.Join(t.TempDir(), ".env"))
-	if err := srv.Svc.ModelPolicy.Write(modelpolicy.Policy{Enabled: true, Allow: []string{"gpt-5"}}); err != nil {
+	if err := srv.Svc.ModelPolicy.Write(modelpolicy.Policy{
+		Enabled:  true,
+		Allow:    []string{"gpt-5"},
+		Domestic: modelpolicy.SiteRules{Allow: []string{"hy3"}},
+	}); err != nil {
 		t.Fatal(err)
 	}
 
-	mk := func(model string) *httptest.ResponseRecorder {
+	mk := func(model, site string) *httptest.ResponseRecorder {
 		req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:32126/v1/chat/completions",
 			strings.NewReader(`{"model":"`+model+`","messages":[{"role":"user","content":"hi"}]}`))
 		req.Header.Set("Authorization", "Bearer secret-key")
 		req.Header.Set("Content-Type", "application/json")
+		if site != "" {
+			req.Header.Set("X-Site", site)
+		}
 		rec := httptest.NewRecorder()
 		srv.HTTP.Handler.ServeHTTP(rec, req)
 		return rec
 	}
 
-	if rec := mk("deepseek-v4.1-flash"); rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "白名单") {
+	if rec := mk("deepseek-v4.1-flash", "global"); rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "白名单") {
 		t.Fatalf("blocked status=%d body=%s", rec.Code, rec.Body.String())
 	}
 }

@@ -52,20 +52,30 @@ func TestRejectReasonBehavior(t *testing.T) {
 		name   string
 		pol    Policy
 		id     string
+		site   string
 		expect bool // true=allowed
 	}{
-		{"disabled allows all", Policy{}, "deepseek-v4.1-flash", true},
-		{"empty allow list allows", Policy{Enabled: true}, "hy3", true},
-		{"in allow list", Policy{Enabled: true, Allow: []string{"hy3", "hy4-preview"}}, "hy4-preview", true},
-		{"not in allow list", Policy{Enabled: true, Allow: []string{"hy3"}}, "glm-5", false},
-		{"auto always allowed", Policy{Enabled: true, Allow: []string{"hy3"}}, "auto", true},
-		{"denied", Policy{Enabled: true, Deny: []string{"glm"}}, "glm", false},
-		{"deny overrides allow", Policy{Enabled: true, Allow: []string{"glm"}, Deny: []string{"glm"}}, "glm", false},
+		{"disabled allows all", Policy{}, "deepseek-v4.1-flash", "", true},
+		{"empty allow list allows", Policy{Enabled: true}, "hy3", "", true},
+		{"in allow list", Policy{Enabled: true, Allow: []string{"hy3", "hy4-preview"}}, "hy4-preview", "", true},
+		{"not in allow list", Policy{Enabled: true, Allow: []string{"hy3"}}, "glm-5", "", false},
+		{"auto always allowed", Policy{Enabled: true, Allow: []string{"hy3"}}, "auto", "", true},
+		{"denied", Policy{Enabled: true, Deny: []string{"glm"}}, "glm", "", false},
+		{"deny overrides allow", Policy{Enabled: true, Allow: []string{"glm"}, Deny: []string{"glm"}}, "glm", "", false},
+		{"domestic allow overrides global", Policy{Enabled: true, Allow: []string{"gpt-5"}, Domestic: SiteRules{Allow: []string{"hy3"}}}, "hy3", "domestic", true},
+		{"domestic allow excludes global-only", Policy{Enabled: true, Allow: []string{"gpt-5"}, Domestic: SiteRules{Allow: []string{"hy3"}}}, "gpt-5", "domestic", false},
+		{"domestic deny overrides global allow", Policy{Enabled: true, Allow: []string{"hy3"}, Domestic: SiteRules{Deny: []string{"hy3"}}}, "hy3", "domestic", false},
+		{"domestic deny does not affect global", Policy{Enabled: true, Allow: []string{"hy3"}, Domestic: SiteRules{Deny: []string{"hy3"}}}, "hy3", "global", true},
+		{"global allow works", Policy{Enabled: true, Allow: []string{"hy3"}, Global: SiteRules{Allow: []string{"gpt-5"}}}, "gpt-5", "global", true},
+		{"global allow excludes global-only", Policy{Enabled: true, Allow: []string{"hy3"}, Global: SiteRules{Allow: []string{"gpt-5"}}}, "hy3", "global", false},
+		{"site empty allow falls back to global", Policy{Enabled: true, Allow: []string{"hy3"}}, "hy3", "domestic", true},
+		{"site empty allow falls back to global 2", Policy{Enabled: true, Allow: []string{"hy3"}}, "hy3", "global", true},
+		{"cn alias works", Policy{Enabled: true, Allow: []string{"gpt-5"}, Domestic: SiteRules{Allow: []string{"hy3"}}}, "hy3", "cn", true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := tc.pol.Allowed(tc.id); got != tc.expect {
-				t.Fatalf("Allowed(%s)=%v want %v (policy=%+v)", tc.id, got, tc.expect, tc.pol)
+			if got := tc.pol.Allowed(tc.id, tc.site); got != tc.expect {
+				t.Fatalf("Allowed(%s, %s)=%v want %v (policy=%+v)", tc.id, tc.site, got, tc.expect, tc.pol)
 			}
 		})
 	}
@@ -79,10 +89,9 @@ func TestFilterKeepsAuto(t *testing.T) {
 	type fake struct{ ID string }
 	fakes := []fake{{"auto"}, {"hy3"}, {"glm"}}
 
-	// Filter expects models.Model; we check via Allowed loop for simplicity.
 	allowed := 0
 	for _, m := range fakes {
-		if pol.Allowed(m.ID) {
+		if pol.Allowed(m.ID, "") {
 			allowed++
 		}
 	}

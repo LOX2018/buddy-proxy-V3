@@ -715,7 +715,7 @@ pre{
       </div>
     </section>
 
-    <section class="panel">
+     <section class="panel">
       <div class="panel-inner">
         <div class="section-head">
           <div>
@@ -732,12 +732,38 @@ pre{
         </div>
         <div class="field-grid">
           <div>
-            <label for="mpAllow">允许列表（allow）</label>
+            <label for="mpAllow">全局允许列表（allow）</label>
             <textarea id="mpAllow" rows="6" spellcheck="false" placeholder="hy3&#10;hy4-preview&#10;"></textarea>
           </div>
           <div>
-            <label for="mpDeny">禁用列表（deny，可选）</label>
+            <label for="mpDeny">全局禁用列表（deny，可选）</label>
             <textarea id="mpDeny" rows="6" spellcheck="false" placeholder="glm-5.3-flash"></textarea>
+          </div>
+        </div>
+        <div class="section-head" style="margin-top:20px;border:none;padding:0">
+          <div class="idx"><span class="k">国内 (domestic)</span></div>
+        </div>
+        <div class="field-grid">
+          <div>
+            <label for="mpDomAllow">国内允许列表（覆盖全局）</label>
+            <textarea id="mpDomAllow" rows="4" spellcheck="false" placeholder="hy3&#10;hy4-preview&#10;"></textarea>
+          </div>
+          <div>
+            <label for="mpDomDeny">国内禁用列表（可选）</label>
+            <textarea id="mpDomDeny" rows="4" spellcheck="false" placeholder="glm-5.3-flash"></textarea>
+          </div>
+        </div>
+        <div class="section-head" style="margin-top:20px;border:none;padding:0">
+          <div class="idx"><span class="k">国际 (global)</span></div>
+        </div>
+        <div class="field-grid">
+          <div>
+            <label for="mpGlbAllow">国际允许列表（覆盖全局）</label>
+            <textarea id="mpGlbAllow" rows="4" spellcheck="false" placeholder="gpt-5&#10;deepseek-v4.1-flash&#10;"></textarea>
+          </div>
+          <div>
+            <label for="mpGlbDeny">国际禁用列表（可选）</label>
+            <textarea id="mpGlbDeny" rows="4" spellcheck="false" placeholder="glm-5.3-flash"></textarea>
           </div>
         </div>
         <div class="actions">
@@ -2145,13 +2171,26 @@ async function loadModelPolicy(){
   $('mpEnabled').checked = !!data.enabled;
   $('mpAllow').value = (data.allow || []).join('\n');
   $('mpDeny').value = (data.deny || []).join('\n');
+  $('mpDomAllow').value = ((data.domestic || {}).allow || []).join('\n');
+  $('mpDomDeny').value = ((data.domestic || {}).deny || []).join('\n');
+  $('mpGlbAllow').value = ((data.global || {}).allow || []).join('\n');
+  $('mpGlbDeny').value = ((data.global || {}).deny || []).join('\n');
   $('mpStatus').textContent = (data.path || '') + (data.enabled ? ' · 已启用' : ' · 未启用');
 }
 async function saveModelPolicy(){
+  const parseList = function(el){ return el.value.split('\n').map(function(s){ return s.trim(); }).filter(Boolean); };
   const body = {
     enabled: $('mpEnabled').checked,
-    allow: $('mpAllow').value.split('\n').map(function(s){ return s.trim(); }).filter(Boolean),
-    deny: $('mpDeny').value.split('\n').map(function(s){ return s.trim(); }).filter(Boolean)
+    allow: parseList($('mpAllow')),
+    deny: parseList($('mpDeny')),
+    domestic: {
+      allow: parseList($('mpDomAllow')),
+      deny: parseList($('mpDomDeny'))
+    },
+    global: {
+      allow: parseList($('mpGlbAllow')),
+      deny: parseList($('mpGlbDeny'))
+    }
   };
   const res = await fetch('/direct-admin/api/system/model-policy', {
     method:'PUT', credentials:'same-origin',
@@ -2163,6 +2202,10 @@ async function saveModelPolicy(){
   $('mpEnabled').checked = !!d.enabled;
   $('mpAllow').value = (d.allow || []).join('\n');
   $('mpDeny').value = (d.deny || []).join('\n');
+  $('mpDomAllow').value = ((d.domestic || {}).allow || []).join('\n');
+  $('mpDomDeny').value = ((d.domestic || {}).deny || []).join('\n');
+  $('mpGlbAllow').value = ((d.global || {}).allow || []).join('\n');
+  $('mpGlbDeny').value = ((d.global || {}).deny || []).join('\n');
   $('mpStatus').textContent = (d.path || '') + (d.enabled ? ' · 已启用' : ' · 未启用');
   showToast(d.enabled ? '白名单已保存并启用' : '白名单已保存（未启用）');
 }

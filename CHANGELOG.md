@@ -5,6 +5,30 @@
 
 ---
 
+---
+
+## dev · 模型白名单支持国内 / 国际分区覆盖
+
+### 改动
+
+- **模型白名单支持按区域独立配置。** 策略文件新增 `domestic` / `global` 分区，各自可设置独立的 `allow` / `deny` 列表。分区 `allow` 非空时覆盖全局 `allow`，分区 `deny` 累加全局 `deny`；不设分区时行为与原先一致。`GET /v1/models` 和 `/v1/chat/completions` 均按当前请求区域生效。管理台新增国内 / 国际 allow / deny 编辑区，保存后立即热加载。
+
+```json
+{
+  "enabled": true,
+  "allow": ["hy3", "gpt-5"],
+  "deny":  ["glm-5.2"],
+  "domestic": { "allow": ["hy3", "hy4-preview"] },
+  "global":   { "allow": ["gpt-5", "deepseek-v4.1-flash"] }
+}
+```
+
+### 兼容性
+
+- 无分区字段的旧策略文件完全兼容，行为不变。
+
+---
+
 ## v0.5.6 · 2026-10-04 · 国际站授权走无痕窗口 · 上游请求不再被环境代理劫持
 
 ### 改动

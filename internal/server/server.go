@@ -59,7 +59,7 @@ func New(cfg config.Config, svc *gateway.Service) *Server {
 		Svc:          svc,
 		upd:          updatecheck.New(nil),
 		apiLockout:   ratelimit.New(20, 5*time.Minute),
-		adminLockout: ratelimit.New(20, 5*time.Minute),
+		adminLockout: ratelimit.New(5, 5*time.Minute),
 		anonLimiter:  ratelimit.New(30, time.Minute),
 	}
 	svc.OnActivity = func(kind string, fields map[string]any) {
@@ -357,12 +357,13 @@ func (s *Server) handleModelInfoAuth(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleModelInfo(w http.ResponseWriter, r *http.Request, keySite string) {
 	fresh := queryTruthy(r.URL.Query().Get("fresh"))
-	listed, err := s.Svc.ListModelsForSite(r.Context(), resolveRequestSite("", r.Header.Get("X-Site"), keySite), fresh)
+	site := resolveRequestSite("", r.Header.Get("X-Site"), keySite)
+	listed, err := s.Svc.ListModelsForSite(r.Context(), site, fresh)
 	models := listed.Models
 	if err != nil || len(models) == 0 {
 		models = s.Svc.ConfiguredModels()
 	}
-	models = s.applyModelPolicy(models)
+	models = s.applyModelPolicy(models, site)
 	data := make([]map[string]any, 0, len(models))
 	for _, model := range models {
 		if model.ID == "" {
@@ -375,12 +376,13 @@ func (s *Server) handleModelInfo(w http.ResponseWriter, r *http.Request, keySite
 
 func (s *Server) handleModels(w http.ResponseWriter, r *http.Request, keySite string) {
 	fresh := queryTruthy(r.URL.Query().Get("fresh"))
-	listed, err := s.Svc.ListModelsForSite(r.Context(), resolveRequestSite("", r.Header.Get("X-Site"), keySite), fresh)
+	site := resolveRequestSite("", r.Header.Get("X-Site"), keySite)
+	listed, err := s.Svc.ListModelsForSite(r.Context(), site, fresh)
 	models := listed.Models
 	if err != nil || len(models) == 0 {
 		models = s.Svc.ConfiguredModels()
 	}
-	models = s.applyModelPolicy(models)
+	models = s.applyModelPolicy(models, site)
 	created := time.Now().Unix()
 	data := make([]map[string]any, 0, len(models))
 	for _, model := range models {
@@ -429,8 +431,8 @@ func resolveRequestSite(modelSite, headerSite, keySite string) string {
 	return config.OptionalSite(headerSite)
 }
 
-// applyModelPolicy 按模型白名单过滤对外模型目录。
-func (s *Server) applyModelPolicy(list []models.Model) []models.Model {
+// applyModelPolicy 按模型白名单过滤对外模型目录（含分区规则）。
+func (s *Server) applyModelPolicy(list []models.Model, site string) []models.Model {
 	if s.Svc == nil || s.Svc.ModelPolicy == nil {
 		return list
 	}
@@ -438,7 +440,7 @@ func (s *Server) applyModelPolicy(list []models.Model) []models.Model {
 	if err != nil {
 		return list
 	}
-	kept, _ := pol.Filter(list)
+	kept, _ := pol.Filter(list, site)
 	return kept
 }
 
@@ -469,14 +471,6 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request, k
 		return
 	}
 	providerModel := gateway.ResolveProviderModel(body.Model)
-	if s.Svc != nil && s.Svc.ModelPolicy != nil {
-		if pol, err := s.Svc.ModelPolicy.Read(); err == nil {
-			if reason := pol.RejectReason(providerModel.Model); reason != "" {
-				httputil.WriteJSON(w, http.StatusBadRequest, openai.NewError(reason, "invalid_request_error"))
-				return
-			}
-		}
-	}
 	promptChars := estimatePromptChars(body.Messages)
 	chatStarted := time.Now()
 	proxyRequestID := s.newProxyRequestID()
@@ -489,6 +483,14 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request, k
 	}
 	reasoningEffort := strutil.First(body.ReasoningEffort, body.ReasoningEffortAlt)
 	site := resolveRequestSite(providerModel.Site, r.Header.Get("X-Site"), keySite)
+	if s.Svc != nil && s.Svc.ModelPolicy != nil {
+		if pol, err := s.Svc.ModelPolicy.Read(); err == nil {
+			if reason := pol.RejectReason(providerModel.Model, site); reason != "" {
+				httputil.WriteJSON(w, http.StatusBadRequest, openai.NewError(reason, "invalid_request_error"))
+				return
+			}
+		}
+	}
 	completeOpts := gateway.CompleteOptions{
 		Model:               providerModel.Model,
 		Messages:            body.Messages,
@@ -1059,37 +1061,43 @@ func (s *Server) handleAdminAPI(w http.ResponseWriter, r *http.Request, path str
 			return
 		}
 		httputil.WriteJSON(w, http.StatusOK, map[string]any{
-			"ok":      true,
-			"path":    s.Svc.ModelPolicy.Path(),
-			"policy":  pol,
-			"enabled": pol.Enabled,
-			"allow":   pol.Allow,
-			"deny":    pol.Deny,
+			"ok":       true,
+			"path":     s.Svc.ModelPolicy.Path(),
+			"policy":   pol,
+			"enabled":  pol.Enabled,
+			"allow":    pol.Allow,
+			"deny":     pol.Deny,
+			"domestic": pol.Domestic,
+			"global":   pol.Global,
 		})
 		return
 	case path == "/direct-admin/api/system/model-policy" && r.Method == http.MethodPut:
 		var body struct {
-			Enabled bool     `json:"enabled"`
-			Allow   []string `json:"allow"`
-			Deny    []string `json:"deny"`
+			Enabled  bool                  `json:"enabled"`
+			Allow    []string              `json:"allow"`
+			Deny     []string              `json:"deny"`
+			Domestic modelpolicy.SiteRules `json:"domestic"`
+			Global   modelpolicy.SiteRules `json:"global"`
 		}
 		if err := httputil.ReadJSON(r, &body); err != nil {
 			httputil.WriteJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "invalid JSON body"})
 			return
 		}
-		pol := modelpolicy.Policy{Enabled: body.Enabled, Allow: body.Allow, Deny: body.Deny}
+		pol := modelpolicy.Policy{Enabled: body.Enabled, Allow: body.Allow, Deny: body.Deny, Domestic: body.Domestic, Global: body.Global}
 		if err := s.Svc.ModelPolicy.Write(pol); err != nil {
 			httputil.WriteJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
 			return
 		}
 		s.LogActivity("model-policy-update", map[string]any{"enabled": pol.Enabled, "allowCount": len(pol.Allow)})
 		httputil.WriteJSON(w, http.StatusOK, map[string]any{
-			"ok":      true,
-			"path":    s.Svc.ModelPolicy.Path(),
-			"policy":  pol,
-			"enabled": pol.Enabled,
-			"allow":   pol.Allow,
-			"deny":    pol.Deny,
+			"ok":       true,
+			"path":     s.Svc.ModelPolicy.Path(),
+			"policy":   pol,
+			"enabled":  pol.Enabled,
+			"allow":    pol.Allow,
+			"deny":     pol.Deny,
+			"domestic": pol.Domestic,
+			"global":   pol.Global,
 		})
 		return
 	// 各账号签到状态。
