@@ -561,36 +561,6 @@ func TestAdminLockoutAfterFailedAttempts(t *testing.T) {
 	// 第 6 次应被锁。
 	req := httptest.NewRequest(http.MethodGet, "http://127.0.0.1:32126/direct-admin/api/status", nil)
 	req.SetBasicAuth("admin", "wrong-pass")
-	rec = httptest.NewRecorder()
-	srv.HTTP.Handler.ServeHTTP(rec, req)
-	if rec.Code != http.StatusTooManyRequests {
-		t.Fatalf("lockout status=%d want 429", rec.Code)
-	}
-	// 正确密码可重置锁并放行。
-	req = httptest.NewRequest(http.MethodGet, "http://127.0.0.1:32126/direct-admin/api/status", nil)
-	req.SetBasicAuth("admin", "admin-pass")
-	rec = httptest.NewRecorder()
-	srv.HTTP.Handler.ServeHTTP(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("after correct pass status=%d", rec.Code)
-	}
-}
-
-func TestAdminLockoutAfterFailedAttempts(t *testing.T) {
-	srv := testServer(t, false, "admin-pass", "")
-	// 连续失败 5 次（当前阈值）触发锁定。
-	for i := 0; i < 5; i++ {
-		req := httptest.NewRequest(http.MethodGet, "http://127.0.0.1:32126/direct-admin/api/status", nil)
-		req.SetBasicAuth("admin", "wrong-pass")
-		rec := httptest.NewRecorder()
-		srv.HTTP.Handler.ServeHTTP(rec, req)
-		if rec.Code != http.StatusUnauthorized && rec.Code != http.StatusTooManyRequests {
-			t.Fatalf("attempt %d: unexpected status=%d", i+1, rec.Code)
-		}
-	}
-	// 第 6 次应被锁。
-	req := httptest.NewRequest(http.MethodGet, "http://127.0.0.1:32126/direct-admin/api/status", nil)
-	req.SetBasicAuth("admin", "wrong-pass")
 	rec := httptest.NewRecorder()
 	srv.HTTP.Handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusTooManyRequests {
