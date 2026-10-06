@@ -421,6 +421,15 @@ func (s *Service) CompleteFromPool(ctx context.Context, opts CompleteOptions) (C
 			if retryErr != nil {
 				// 不要用「无可用账号 / 重试深度超限」掩盖真实上游错误（429/503 等）。
 				if isRetryExhausted(retryErr) {
+					// 所有账号均失败，记录最终错误（429/503/配额耗尽等）到活动日志。
+					if s.OnActivity != nil {
+						s.OnActivity("chat-error", map[string]any{
+							"account": strutil.First(account.Label, account.ID),
+							"site":    config.NormalizeSite(account.Site),
+							"model":   opts.Model,
+							"error":   err.Error(),
+						})
+					}
 					return CompleteResult{}, err
 				}
 				return CompleteResult{}, retryErr
@@ -440,6 +449,15 @@ func (s *Service) CompleteFromPool(ctx context.Context, opts CompleteOptions) (C
 			}
 		}
 		_ = s.Pool.MarkResult(selection, false, err.Error(), s.resolveFailureCooldown(ctx, account, err))
+		// 不可重试错误（11128/11101/11102/11140 等）也记录到活动日志。
+		if s.OnActivity != nil {
+			s.OnActivity("chat-error", map[string]any{
+				"account": strutil.First(account.Label, account.ID),
+				"site":    config.NormalizeSite(account.Site),
+				"model":   opts.Model,
+				"error":   err.Error(),
+			})
+		}
 		return CompleteResult{}, err
 	}
 	_ = s.Pool.MarkResult(selection, true, "", 0)
