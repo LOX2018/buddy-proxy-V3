@@ -436,6 +436,9 @@ func (s *Server) applyModelPolicy(list []models.Model, site string) []models.Mod
 	if s.Svc == nil || s.Svc.ModelPolicy == nil {
 		return list
 	}
+	if strings.TrimSpace(site) == "" {
+		site = s.Svc.ActivePoolSite()
+	}
 	pol, err := s.Svc.ModelPolicy.Read()
 	if err != nil {
 		return list
@@ -483,9 +486,13 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request, k
 	}
 	reasoningEffort := strutil.First(body.ReasoningEffort, body.ReasoningEffortAlt)
 	site := resolveRequestSite(providerModel.Site, r.Header.Get("X-Site"), keySite)
+	policySite := site
+	if strings.TrimSpace(policySite) == "" {
+		policySite = s.Svc.ActivePoolSite()
+	}
 	if s.Svc != nil && s.Svc.ModelPolicy != nil {
 		if pol, err := s.Svc.ModelPolicy.Read(); err == nil {
-			if reason := pol.RejectReason(providerModel.Model, site); reason != "" {
+			if reason := pol.RejectReason(providerModel.Model, policySite); reason != "" {
 				httputil.WriteJSON(w, http.StatusBadRequest, openai.NewError(reason, "invalid_request_error"))
 				return
 			}

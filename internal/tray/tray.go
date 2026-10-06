@@ -299,7 +299,8 @@ func (a *TrayApp) Notify(title, text string) {
 	nid.CbSize = uint32(unsafe.Sizeof(NOTIFYICONDATA{}))
 	nid.HWnd = a.hwnd
 	nid.UID = 1
-	nid.UFlags = NIF_INFO
+	nid.UFlags = NIF_INFO | NIF_ICON
+	nid.HIcon = loadIcon(a.hinstance)
 	copyStringToUTF16(nid.SzInfoTitle[:], title)
 	copyStringToUTF16(nid.SzInfo[:], text)
 	procShellNotifyIconW.Call(uintptr(NIM_MODIFY), uintptr(unsafe.Pointer(&nid)))
@@ -312,7 +313,7 @@ func (a *TrayApp) Loop() {
 		if r == 0 {
 			break
 		}
-		if r == 0xFFFFFFFF {
+		if int32(r) == -1 {
 			break
 		}
 		procTranslateMessage.Call(uintptr(unsafe.Pointer(&msg)))

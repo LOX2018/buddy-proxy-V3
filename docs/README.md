@@ -9,6 +9,7 @@ Buddy Proxy 文档目录（CodeBuddy / WorkBuddy 协议网关）。
 | [../README.md](../README.md) | 子项目总览与快速开始 |
 | [guides/getting-started.md](guides/getting-started.md) | 安装、启动、首次 OAuth、验证 |
 | [guides/configuration.md](guides/configuration.md) | **全部环境变量、默认值、`.env` 查找顺序、旧版兼容名** |
+| [guides/packaging.md](guides/packaging.md) | **打包说明：只打 Windows 托盘版，构建标志与排障** |
 | [architecture/overview.md](architecture/overview.md) | 架构、包职责、请求链路、并发模型 |
 | [api/http.md](api/http.md) | Public `/v1` 接口与 Admin API |
 | [operations/runbook.md](operations/runbook.md) | 运行、排障、持久化、资源占用 |
