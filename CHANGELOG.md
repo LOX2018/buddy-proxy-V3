@@ -7,6 +7,29 @@
 
 ---
 
+## v5.2 · 2026-10-16 · 单实例锁 + 启动失败即退出（消除双实例与无托盘僵尸进程）
+
+### 改动
+
+- **单实例锁（Windows 命名互斥量）。** GUI 版启动时先申请 `CodeBuddyProxySingleton` 互斥量，第二实例检测到同名锁被持有时弹窗「CodeBuddy Proxy 已在运行」并直接退出，不再静默残留。互斥量句柄在 `main` 返回时释放，进程退出时内核也会自动回收，重启不残留锁。
+- **服务启动失败不再挂死。** 旧实现里 `ListenAndServe` 报错只 log 一次，进程继续运行；若托盘已就绪，用户看到图标但 HTTP 服务实际已停。现在服务 goroutine 捕获到错误后调用 `app.RequestQuit()` 平滑退出消息循环，`Loop()` 返回后再弹出「服务启动失败」说明具体错误（端口占用等），用户不会再遇到"图标还在但接口已经废了"的状态。
+- **托盘启动失败改为弹窗 + 主动退出。** 旧实现里 `app.Start()` 失败走 `select{}` 永久阻塞，进程常驻但无托盘，只能从任务管理器强杀。现在弹窗告知原因、主动调用 `srv.Shutdown()` 清理服务后正常返回，进程自然结束。
+- **启动顺序调整为"先托盘后服务"。** 端口冲突等启动错误发生时窗口已就绪，`RequestQuit` 能正常投递，不再留下"僵尸进程 + 无托盘"的中间态。
+
+### 兼容性
+
+- 无托盘的 CLI 版（`cmd/codebuddy-proxy`）未加单实例锁；如需同时跑 GUI 与 CLI，请让 CLI 监听不同端口，避免端口冲突时触发新的弹窗路径。
+- 单实例锁为 Windows 平台实现；非 Windows 编译目标下 `Acquire` 为空操作，行为与旧版一致。
+- 部署目录里 `bin/codebuddy-proxy.exe`（CLI）与 `dist/releases/...exe`（GUI）是不同产物，请只从 `dist` 启动用户态入口，避免双实例。
+
+### 验证
+
+- 新增 `internal/singleinstance` 单元测试：`TestAcquireBlocksSecond`、`TestReleaseAllowsReacquire`、`TestDifferentNamesIndependent` 全部通过。
+- 全量 `go test ./...` 通过，`go vet`、`gofmt` 无差异。
+- 端到端：连续启动两个 GUI 进程，第二实例弹窗提示后退出，第一实例正常运行不受影响。
+
+---
+
 ## dev · 模型白名单分区覆盖（allow 模式）+ UI 布局优化
 
 ### 改动

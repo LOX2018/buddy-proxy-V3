@@ -4,10 +4,12 @@ package main
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"os"
 	"os/signal"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -15,11 +17,36 @@ import (
 	"github.com/wnddd839/codebuddy-proxy/internal/gateway"
 	"github.com/wnddd839/codebuddy-proxy/internal/openprivate"
 	"github.com/wnddd839/codebuddy-proxy/internal/server"
+	"github.com/wnddd839/codebuddy-proxy/internal/singleinstance"
 	"github.com/wnddd839/codebuddy-proxy/internal/tray"
 )
 
+const singletonName = "CodeBuddyProxySingleton"
+
 func main() {
 	hideConsoleWindow()
+
+	// 单实例锁：命名互斥量跨进程唯一，第二次启动直接弹窗提示退出，
+	// 避免"有托盘的进程被抢端口后静默残留、无托盘进程无法关闭"的僵尸态。
+	m, err := singleinstance.Acquire(singletonName)
+	if errors.Is(err, singleinstance.ErrAlreadyRunning) {
+		singleinstance.Popup(
+			"CodeBuddy Proxy 已在运行",
+			"检测到已有 CodeBuddy Proxy 进程在运行，请在系统托盘右键打开管理台；本次启动已退出。",
+			singleinstance.MB_ICONWARNING,
+		)
+		return
+	}
+	if err != nil {
+		singleinstance.Popup(
+			"CodeBuddy Proxy 启动失败",
+			"获取单实例锁失败："+err.Error(),
+			singleinstance.MB_ICONWARNING,
+		)
+		return
+	}
+	defer m.Release()
+
 	cfg := config.Load()
 
 	if strings.TrimSpace(cfg.APIKey) == "" && len(cfg.APIKeys) == 0 {
@@ -55,13 +82,6 @@ func main() {
 
 	adminURL := adminURLFor(cfg)
 
-	go func() {
-		if err := srv.ListenAndServe(); err != nil {
-			logger.Error("server exited", "error", err)
-			srv.LogActivity("server-error", map[string]any{"event": "server-exit", "error": err.Error()})
-		}
-	}()
-
 	app := tray.New("CodeBuddy Proxy")
 	app.Open = func() { tray.OpenURL(adminURL) }
 	app.OpenURL = adminURL
@@ -85,6 +105,35 @@ func main() {
 		}
 	}
 
+	// 先启动托盘，再放服务上线：这样端口冲突等启动错误发生时窗口已就绪，
+	// 可以通过 RequestQuit 平滑结束消息循环，不会留下"僵尸进程 + 无托盘"。
+	if err := app.Start(); err != nil {
+		logger.Error("tray start failed", "error", err)
+		srv.LogActivity("server-error", map[string]any{"event": "tray-start-failed", "error": err.Error()})
+		singleinstance.Popup(
+			"CodeBuddy Proxy 托盘启动失败",
+			"托盘图标创建失败："+err.Error()+"\n服务已停止，请重启程序后再试。",
+			singleinstance.MB_ICONWARNING,
+		)
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		_ = srv.Shutdown(ctx)
+		return
+	}
+
+	// 服务启动失败（端口占用、bind 错误等）时请求托盘退出，而不是静默挂死；
+	// 失败原因通过弹窗告知用户，避免"图标还在但接口已经废了"的隐形状态。
+	// 用 atomic.Value 传递错误，避免 goroutine 写 / 主协程读之间的 data race。
+	var serverErr atomic.Value
+	go func() {
+		if err := srv.ListenAndServe(); err != nil {
+			serverErr.Store(err)
+			logger.Error("server exited", "error", err)
+			srv.LogActivity("server-error", map[string]any{"event": "server-exit", "error": err.Error()})
+			app.RequestQuit()
+		}
+	}()
+
 	// 接收系统关闭信号（如关机/注销前）。
 	go func() {
 		sigCh := make(chan os.Signal, 1)
@@ -93,14 +142,18 @@ func main() {
 		app.RequestQuit()
 	}()
 
-	if err := app.Start(); err != nil {
-		logger.Error("tray start failed", "error", err)
-		select {}
-	}
 	app.Notify("CodeBuddy Proxy 已启动", "服务运行中，托盘图标常驻。\n"+"管理台: "+adminURL)
 	tray.OpenURL(adminURL)
 	app.Loop()
 	app.Cleanup()
+
+	if v := serverErr.Load(); v != nil {
+		singleinstance.Popup(
+			"CodeBuddy Proxy 服务启动失败",
+			"HTTP 服务未能启动："+v.(error).Error()+"\n可能是端口被其他程序占用，或配置有误。",
+			singleinstance.MB_ICONWARNING,
+		)
+	}
 }
 
 func adminURLFor(cfg config.Config) string {
