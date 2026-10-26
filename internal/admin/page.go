@@ -8,7 +8,7 @@ import (
 // UIRevision is the admin console markup/script stamp. Bump it on every
 // meaningful change to PageHTML so operators can tell the rebuilt binary
 // carries the new UI (independent of the release tag injected via ldflags).
-const UIRevision = "2026.10.04-oauth-inprivate"
+const UIRevision = "2026.10.16-chat-error-log"
 
 func PageHTML() string {
 	return `<!doctype html>
@@ -224,6 +224,21 @@ textarea{
 }
 textarea:focus{border-color:var(--accent)}
 .policy-switch{display:flex;align-items:center;gap:16px;margin:4px 0 16px;flex-wrap:wrap}
+.sched-row{display:flex;align-items:center;gap:12px;flex-wrap:wrap;padding:8px 12px;border:1px solid var(--fg-12);border-radius:8px;background:rgba(0,0,0,.14)}
+.sched-row .toggle span{font-size:12px;letter-spacing:.06em;text-transform:uppercase;color:var(--fg-70);font-weight:600}
+.sched-row:has(input:checked){border-color:var(--accent);background:rgba(63,198,176,.06)}
+.sched-group{display:flex;flex-direction:column;gap:10px;padding:12px;border:1px solid var(--fg-10);border-radius:10px;background:rgba(0,0,0,.08)}
+.sched-group-head{display:flex;align-items:center;gap:12px}
+.sched-group-head .idx{margin:0}
+.sched-group-head .k{font-size:11px;font-family:var(--sans);letter-spacing:.18em;text-transform:uppercase;color:var(--fg-60);font-weight:600}
+.sched-allow label{font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--fg-60);font-weight:600;margin-bottom:6px}
+.sched-allow textarea{rows:3}
+.sched-cols{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.sched-col{display:flex;flex-direction:column;gap:10px;min-width:0}
+.sched-cols .sched-row{gap:8px;padding:8px 10px}
+.mp-time{width:48px;padding-left:4px;padding-right:4px;font-family:var(--mono);font-size:12px}
+.sched-cols .mp-active{min-width:0}
+@media (max-width:760px){.sched-cols{grid-template-columns:1fr}}
 .toggle{display:flex;align-items:center;gap:10px;margin:0;cursor:pointer;user-select:none}
 .toggle input{width:auto;padding:0;border:none;accent-color:var(--accent);height:16px;width:16px;cursor:pointer}
 .toggle span{
@@ -715,41 +730,51 @@ pre{
       </div>
     </section>
 
-     <section class="panel">
-      <div class="panel-inner">
-        <div class="section-head">
-          <div>
-            <h2>模型白名单</h2>
-            <p>写入 <code>~/.codebuddy/proxy-modelpolicy.json</code>。开启后仅允许列表内模型：公开 <code>/v1/models</code> 只返回白名单模型，<code>/v1/chat/completions</code> 对白名单外模型直接拒绝。<code>auto</code> 始终可用；管理台仍显示完整编目。每行一个模型 ID。</p>
+      <section class="panel">
+       <div class="panel-inner">
+         <div class="section-head">
+           <div>
+             <h2>模型白名单</h2>
+             <p>写入 <code>~/.codebuddy/proxy-modelpolicy.json</code>。开启后仅允许列表内模型：公开 <code>/v1/models</code> 只返回白名单模型，<code>/v1/chat/completions</code> 对白名单外模型直接拒绝。<code>auto</code> 始终可用；管理台仍显示完整编目。每行一个模型 ID。</p>
+           </div>
+         </div>
+         <div class="policy-switch">
+           <label class="toggle">
+             <input type="checkbox" id="mpEnabled"/>
+             <span>启用模型白名单</span>
+           </label>
+           <span class="meta-line" id="mpStatus">—</span>
+         </div>
+         <div class="field-grid" style="grid-template-columns:1fr 1fr 1fr;gap:12px">
+           <div>
+             <label for="mpAllow">全局允许列表</label>
+             <textarea id="mpAllow" rows="6" spellcheck="false" placeholder="hy3&#10;hy4-preview&#10;"></textarea>
+           </div>
+           <div>
+             <label for="mpDomAllow">国内允许列表（覆盖全局）</label>
+             <textarea id="mpDomAllow" rows="6" spellcheck="false" placeholder="hy3&#10;hy4-preview&#10;"></textarea>
+           </div>
+           <div>
+             <label for="mpGlbAllow">国际允许列表（覆盖全局）</label>
+             <textarea id="mpGlbAllow" rows="6" spellcheck="false" placeholder="gpt-5&#10;deepseek-v4.1-flash&#10;"></textarea>
+           </div>
+         </div>
+          <div class="field-grid" style="grid-template-columns:1fr;gap:12px;align-items:end">
+            <div>
+              <label>定时生效分区（按分区 × 日夜独立切换）</label>
+              <p class="secret-hint" style="margin:0 0 8px">到点自动切换 allow 列表，覆盖上方分区/全局。时间用 <code>HH:MM</code>，跨午夜时段自动识别。严格按时间匹配：同一分区多个时段命中同一时刻时，各时段的模型合并生效，互不遮蔽。</p>
+            </div>
+            <div class="actions" style="margin:0">
+              <button class="ghost" id="btnSchedPreset" type="button">填充日夜预设</button>
+            </div>
           </div>
+          <div id="mpSchedRows" style="display:flex;flex-direction:column;gap:16px"></div>
+           <div class="actions" style="margin-top:12px">
+             <button class="primary" id="btnSavePolicy" type="button">保存白名单</button>
+             <button class="ghost" id="btnResetPolicy" type="button">重读</button>
+           </div>
         </div>
-        <div class="policy-switch">
-          <label class="toggle">
-            <input type="checkbox" id="mpEnabled"/>
-            <span>启用模型白名单</span>
-          </label>
-          <span class="meta-line" id="mpStatus">—</span>
-        </div>
-        <div class="field-grid" style="grid-template-columns:1fr 1fr 1fr;gap:12px">
-          <div>
-            <label for="mpAllow">全局允许列表</label>
-            <textarea id="mpAllow" rows="6" spellcheck="false" placeholder="hy3&#10;hy4-preview&#10;"></textarea>
-          </div>
-          <div>
-            <label for="mpDomAllow">国内允许列表（覆盖全局）</label>
-            <textarea id="mpDomAllow" rows="6" spellcheck="false" placeholder="hy3&#10;hy4-preview&#10;"></textarea>
-          </div>
-          <div>
-            <label for="mpGlbAllow">国际允许列表（覆盖全局）</label>
-            <textarea id="mpGlbAllow" rows="6" spellcheck="false" placeholder="gpt-5&#10;deepseek-v4.1-flash&#10;"></textarea>
-          </div>
-        </div>
-        <div class="actions">
-          <button class="primary" id="btnSavePolicy" type="button">保存白名单</button>
-          <button class="ghost" id="btnResetPolicy" type="button">重读</button>
-        </div>
-      </div>
-    </section>
+      </section>
   </div>
 
   <!-- ========================================================
@@ -1997,6 +2022,7 @@ function fmtTs(ts){
 }
 const ACTIVITY_KIND_LABEL = {
   'server-start':'服务启动','server-stop':'服务停止','server-error':'服务异常',
+  'chat-error':'聊天失败',
   'checkin':'签到',
   'account-switch':'账号切换','account-enabled':'启用账号','account-disabled':'禁用账号','account-removed':'删除账号',
   'model-policy-update':'更新模型白名单','api-key-generated':'生成 API Key','api-key-bound':'绑定站点 Key'
@@ -2007,8 +2033,10 @@ const ACTIVITY_GROUP = {
   'account-switch':'account','account-enabled':'account','account-disabled':'account','account-removed':'account',
   'model-policy-update':'system','api-key-generated':'system','api-key-bound':'system'
 };
-// 不参与业务分组展示的事件：error 仅出现在下方「报错日志」，open-config-dir 不再展示。
-const ACTIVITY_HIDDEN = {'server-error':true,'open-config-dir':true};
+// 不参与业务分组展示的事件：error/chat-error 仅出现在下方「报错日志」，open-config-dir 不再展示。
+const ACTIVITY_HIDDEN = {'server-error':true,'chat-error':true,'open-config-dir':true};
+// 「报错日志」收录的事件类型：服务异常 + 聊天失败（含白名单拒绝）。
+const ERROR_KINDS = {'server-error':true,'chat-error':true};
 const GROUP_LABEL = {'lifecycle':'服务生命周期','checkin':'签到','account':'账号管理','system':'系统与配置'};
 function actGroupOf(e){
   if (ACTIVITY_HIDDEN[e.kind]) return null;
@@ -2105,28 +2133,43 @@ $('btnRefreshActivity').onclick = function(){
   else refreshActivity().catch(function(e){ showToast(e.message, 'error'); });
 };
 async function refreshErrors(){
-  const data = await api('/direct-admin/api/system/activity?limit=200');
-  $('errMeta').textContent = data.path + (data.size ? ' · ' + data.size + ' bytes' : '');
+  const data = await api('/direct-admin/api/system/activity?limit=500');
+  const keep = (data.maxDays != null && data.maxDays > 0 ? ' · 保留 ' + data.maxDays + ' 天' : '');
+  $('errMeta').textContent = data.path + (data.size ? ' · ' + data.size + ' bytes' : '') + keep;
   const box = $('errorList');
   const list = [];
   const seen = {};
   (data.entries || []).forEach(function(e){
-    if (e.kind !== 'server-error') return;
+    if (!ERROR_KINDS[e.kind]) return;
     const key = e.kind + '\u0001' + e.ts + '\u0001' + JSON.stringify(e.fields || {});
     if (seen[key]) return;
     seen[key] = 1;
     list.push(e);
   });
-  const top = list.slice(0, 3);
+  const top = list.slice(0, 50);
   if (!top.length){
-    box.innerHTML = '<div class="empty">暂无报错记录。服务异常事件会在此显示。</div>';
+    box.innerHTML = '<div class="empty">暂无报错记录。聊天失败、白名单拒绝与服务异常事件会在此显示。</div>';
     return;
   }
-  box.innerHTML = top.map(function(e){
-    return '<div class="act-item"><span class="act-time">' + escapeHtml(fmtTs(e.ts)) + '</span>'
-      + '<span class="act-kind">' + kindName(e.kind) + '</span>'
-      + formatFields(e.fields) + '</div>';
-  }).join('');
+  box.innerHTML = top.map(function(e){ return formatErrorItem(e); }).join('');
+}
+// 报错日志条目：聊天失败带模型/阶段/原因/错误码 + 完整错误正文；其余类型沿用通用字段渲染。
+function formatErrorItem(e){
+  const f = e.fields || {};
+  let body = '<span class="act-kind">' + kindName(e.kind) + '</span>';
+  if (e.kind === 'chat-error'){
+    const parts = [];
+    if (f.model) parts.push('模型 ' + escapeHtml(String(f.model)));
+    if (f.stage) parts.push('阶段 ' + escapeHtml(String(f.stage)));
+    if (f.cause) parts.push('原因 ' + escapeHtml(String(f.cause)));
+    if (f.code != null) parts.push('码 ' + escapeHtml(String(f.code)));
+    if (f.retry_after) parts.push('重试 ' + escapeHtml(String(f.retry_after)));
+    if (parts.length) body += '<span class="act-fields">' + parts.join(' · ') + '</span>';
+    if (f.error) body += '<div class="checkin-detail">' + escapeHtml(String(f.error)) + '</div>';
+  } else {
+    body += formatFields(f);
+  }
+  return '<div class="act-item"><span class="act-time">' + escapeHtml(fmtTs(e.ts)) + '</span>' + body + '</div>';
 }
 $('btnOpenConfigDir').onclick = function(){
   const btn = $('btnOpenConfigDir');
@@ -2144,25 +2187,171 @@ refreshActivity().catch(function(){});
 refreshErrors().catch(function(){});
 
 /* 模型白名单 (Tab 04) */
+// 每个分区最多两条时段：day（日间）与 night（夜间）。保存顺序固定为
+// 国内·日 → 国内·夜 → 国际·日 → 国际·夜 → 全局·日 → 全局·夜。
+// 后端严格按时间匹配：同一区域所有命中当前时刻的窗口取 allow 并集，
+// 因此同分区时段重叠时两边模型都生效（互不遮蔽）。
+var MP_SCHED_SITES = [
+  {site:'domestic', key:'Dom', label:'国内'},
+  {site:'global',   key:'Glb', label:'国际'},
+  {site:'',         key:'All', label:'全局'}
+];
+var MP_SCHED_SLOTS = [
+  {slot:'Day',   label:'日间', defStart:'08:00', defEnd:'20:00'},
+  {slot:'Night', label:'夜间', defStart:'20:00', defEnd:'08:00'}
+];
+var MP_SCHED_ROWS = [];
+(function(){
+  MP_SCHED_SITES.forEach(function(s){
+    MP_SCHED_SLOTS.forEach(function(d){
+      var prefix = 'mpSched' + s.key + d.slot;
+      MP_SCHED_ROWS.push({
+        site: s.site, key: s.key, slot: d.slot, prefix: prefix,
+        label: s.label + '·' + d.label
+      });
+    });
+  });
+})();
+function mpRenderSchedRows(){
+  var box = $('mpSchedRows');
+  if (!box) return;
+  var html = '';
+  MP_SCHED_SITES.forEach(function(s){
+    html += '<div class="sched-group">'
+      + '<div class="sched-group-head"><span class="idx"><span class="k">' + s.label + '</span></span></div>'
+      + '<div class="sched-cols">';
+    MP_SCHED_SLOTS.forEach(function(d){
+      var p = 'mpSched' + s.key + d.slot;
+      html += '<div class="sched-col">'
+        + '<div class="sched-row">'
+          + '<label class="toggle"><input type="checkbox" id="' + p + 'Enabled"/><span>' + d.label + '</span></label>'
+          + '<input id="' + p + 'Start" class="mp-time" type="text" placeholder="HH:MM 开始" title="HH:MM 开始" maxlength="5"/>'
+          + '<span style="color:var(--fg-60)">–</span>'
+          + '<input id="' + p + 'End" class="mp-time" type="text" placeholder="HH:MM 结束" title="HH:MM 结束" maxlength="5"/>'
+          + '<span class="mp-active" style="color:var(--fg-60);font-size:11.5px" id="' + p + 'Active">—</span>'
+          + '</div>'
+          + '<div class="sched-allow"><label for="' + p + 'Allow">' + s.label + '·' + d.label + '时段允许列表</label>'
+          + '<textarea id="' + p + 'Allow" rows="3" spellcheck="false" placeholder="每行一个模型 ID"></textarea></div>'
+        + '</div>';
+    });
+    html += '</div></div>';
+  });
+  box.innerHTML = html;
+  MP_SCHED_ROWS.forEach(function(r){
+    [r.prefix+'Enabled', r.prefix+'Start', r.prefix+'End'].forEach(function(id){
+      var el = $(id);
+      if (!el) return;
+      el.addEventListener('change', function(){ mpRefreshRowStatus(r, null); });
+    });
+  });
+}
+function mpInWindow(start, end, ts){
+  if (!/^\d{2}:\d{2}$/.test(start) || !/^\d{2}:\d{2}$/.test(end)) return false;
+  var d = (ts instanceof Date) ? ts : new Date(ts);
+  var cur = d.getHours()*60 + d.getMinutes();
+  var p1 = start.split(':'), p2 = end.split(':');
+  var s = parseInt(p1[0],10)*60 + parseInt(p1[1],10);
+  var e = parseInt(p2[0],10)*60 + parseInt(p2[1],10);
+  if (isNaN(s) || isNaN(e) || s === e) return false;
+  if (s < e) return cur >= s && cur < e;
+  return cur >= s || cur < e;
+}
+function mpRefreshRowStatus(r, now){
+  var el = {
+    enabled: $(r.prefix + 'Enabled'),
+    start:   $(r.prefix + 'Start'),
+    end:     $(r.prefix + 'End'),
+    active:  $(r.prefix + 'Active')
+  };
+  if (!el.active) return;
+  if (!el.enabled || !el.enabled.checked){
+    el.active.textContent = '—'; el.active.style.color = 'var(--fg-60)'; return;
+  }
+  var s = el.start.value.trim(), e = el.end.value.trim();
+  if (!/^\d{2}:\d{2}$/.test(s) || !/^\d{2}:\d{2}$/.test(e)){
+    el.active.textContent = '格式待填 HH:MM'; el.active.style.color = 'var(--fg-60)'; return;
+  }
+  var ts = now || new Date();
+  if (mpInWindow(s, e, ts)){
+    el.active.textContent = '时段生效'; el.active.style.color = 'var(--accent)';
+  } else {
+    el.active.textContent = '未生效'; el.active.style.color = 'var(--fg-60)';
+  }
+}
+// mpFillRow 填充一行时段配置。只填「已有完整配置」或「明确传入空配置」两种情况：
+// 调用方传 data=null 表示该槽位没有后端数据（清空），传 data={} 表示保留当前输入。
+function mpFillRow(row, data, now){
+  var prefix = row.prefix;
+  var el = {
+    enabled: $(prefix + 'Enabled'),
+    start:   $(prefix + 'Start'),
+    end:     $(prefix + 'End'),
+    allow:   $(prefix + 'Allow'),
+    active:  $(prefix + 'Active')
+  };
+  if (!el.enabled) return;
+  if (data){
+    el.enabled.checked = true;
+    el.start.value = data.start || '';
+    el.end.value = data.end || '';
+    el.allow.value = (data.allow || []).join('\n');
+  }
+  mpRefreshRowStatus(row, now);
+}
+function mpReadWindows(){
+  var out = [];
+  for (var i = 0; i < MP_SCHED_ROWS.length; i++){
+    var r = MP_SCHED_ROWS[i];
+    var en = $(r.prefix + 'Enabled');
+    if (!en || !en.checked) continue;
+    var s = $(r.prefix + 'Start').value.trim();
+    var e = $(r.prefix + 'End').value.trim();
+    if (!/^\d{2}:\d{2}$/.test(s) || !/^\d{2}:\d{2}$/.test(e)){
+      throw new Error(r.label + '时段格式须为 HH:MM');
+    }
+    var allow = $(r.prefix + 'Allow').value.split('\n').map(function(x){return x.trim();}).filter(Boolean);
+    if (!allow.length) throw new Error(r.label + '时段需至少一个模型');
+    out.push({start:s, end:e, site:r.site, allow:allow});
+  }
+  return out;
+}
+// mpIndexWindows 把后端 windows 按 site 归组并保持原始顺序（决定日/夜槽位归属）。
+function mpIndexWindows(windows){
+  var idx = {'domestic':[], 'global':[], '':[]};
+  (windows || []).forEach(function(w){
+    var s = (w && w.site) ? String(w.site).trim() : '';
+    if (s === 'cn') s = 'domestic';
+    else if (s === 'intl') s = 'global';
+    if (!(s in idx)) s = '';
+    idx[s].push(w);
+  });
+  return idx;
+}
 async function loadModelPolicy(){
   const data = await api('/direct-admin/api/system/model-policy');
   $('mpEnabled').checked = !!data.enabled;
   $('mpAllow').value = (data.allow || []).join('\n');
   $('mpDomAllow').value = ((data.domestic || {}).allow || []).join('\n');
   $('mpGlbAllow').value = ((data.global || {}).allow || []).join('\n');
+  var idx = mpIndexWindows(data.windows);
+  var now = data.now;
+  MP_SCHED_ROWS.forEach(function(r){
+    var list = idx[r.site] || [];
+    var w = (r.slot === 'Night') ? (list[1] || null) : (list[0] || null);
+    mpFillRow(r, w, now);
+  });
   $('mpStatus').textContent = (data.path || '') + (data.enabled ? ' · 已启用' : ' · 未启用');
 }
 async function saveModelPolicy(){
   const parseList = function(el){ return el.value.split('\n').map(function(s){ return s.trim(); }).filter(Boolean); };
+  var windows;
+  try { windows = mpReadWindows(); } catch(e){ throw new Error(e.message); }
   const body = {
     enabled: $('mpEnabled').checked,
     allow: parseList($('mpAllow')),
-    domestic: {
-      allow: parseList($('mpDomAllow'))
-    },
-    global: {
-      allow: parseList($('mpGlbAllow'))
-    }
+    domestic: { allow: parseList($('mpDomAllow')) },
+    global: { allow: parseList($('mpGlbAllow')) },
+    windows: windows
   };
   const res = await fetch('/direct-admin/api/system/model-policy', {
     method:'PUT', credentials:'same-origin',
@@ -2175,11 +2364,40 @@ async function saveModelPolicy(){
   $('mpAllow').value = (d.allow || []).join('\n');
   $('mpDomAllow').value = ((d.domestic || {}).allow || []).join('\n');
   $('mpGlbAllow').value = ((d.global || {}).allow || []).join('\n');
+  var idx2 = mpIndexWindows(d.windows);
+  MP_SCHED_ROWS.forEach(function(r){
+    var list = idx2[r.site] || [];
+    var w = (r.slot === 'Night') ? (list[1] || null) : (list[0] || null);
+    mpFillRow(r, w, d.now);
+  });
   $('mpStatus').textContent = (d.path || '') + (d.enabled ? ' · 已启用' : ' · 未启用');
   showToast(d.enabled ? '白名单已保存并启用' : '白名单已保存（未启用）');
 }
+function mpFillDayNightPreset(){
+  MP_SCHED_SITES.forEach(function(s){
+    MP_SCHED_SLOTS.forEach(function(d){
+      var p = 'mpSched' + s.key + d.slot;
+      var en = $(p + 'Enabled');
+      var st = $(p + 'Start');
+      var ed = $(p + 'End');
+      var al = $(p + 'Allow');
+      if (!en || !st || !ed || !al) return;
+      en.checked = true;
+      st.value = d.defStart;
+      ed.value = d.defEnd;
+      if (!al.value.trim()) al.value = '';
+    });
+    var rowDay = MP_SCHED_ROWS.filter(function(r){ return r.key === s.key && r.slot === 'Day'; })[0];
+    var rowNight = MP_SCHED_ROWS.filter(function(r){ return r.key === s.key && r.slot === 'Night'; })[0];
+    if (rowDay) mpRefreshRowStatus(rowDay, null);
+    if (rowNight) mpRefreshRowStatus(rowNight, null);
+  });
+  showToast('已填充日夜预设，请为各时段填写允许列表');
+}
 $('btnSavePolicy').onclick = function(){ saveModelPolicy().catch(function(e){ showToast(e.message, 'error'); }); };
 $('btnResetPolicy').onclick = function(){ loadModelPolicy().catch(function(e){ showToast(e.message, 'error'); }); };
+if ($('btnSchedPreset')) $('btnSchedPreset').onclick = function(){ mpFillDayNightPreset(); };
+mpRenderSchedRows();
 
 /* 签到状态 (Tab 05) */
 async function refreshCheckin(){

@@ -100,8 +100,23 @@ func parseBillingTimeMillis(raw string) int64 {
 
 const maxModelRateLimitCooldown = 48 * time.Hour
 
-// ModelRateLimitCooldown 从 6004 / rate-model 的 "will reset at" 文案解析冷却时长。
-// 解析失败或已过期时返回 ok=false，由调用方回退固定表。
+// resetAnchors 是各语言文案里"重置时刻"的引导词：英文 will reset at，国内站中文 将在。
+var resetAnchors = []string{"will reset at", "将在"}
+
+// resetAnchor 返回引导词在文案中的结束下标，找不到返回 -1。
+// 国内站 6004 文案是"将在 2026-10-16 23:00:00 UTC+8 重置"，不含 "will reset at"，
+// 旧逻辑直接回落固定 2 分钟冷却——限流窗口内每个账号被反复打，白消耗请求。
+func resetAnchor(msg string) int {
+	for _, a := range resetAnchors {
+		if i := strings.Index(msg, a); i >= 0 {
+			return i + len(a)
+		}
+	}
+	return -1
+}
+
+// ModelRateLimitCooldown 从 6004 / rate-model 的"将在…重置 / will reset at"文案解析冷却时长。
+// 解析失败或已过期时返回 ok=false，由调用方回落固定表。
 func ModelRateLimitCooldown(err error, now time.Time) (time.Duration, bool) {
 	if err == nil {
 		return 0, false
@@ -113,15 +128,17 @@ func ModelRateLimitCooldown(err error, now time.Time) (time.Duration, bool) {
 	if !has6004 && !hasRateModel {
 		return 0, false
 	}
-	if !strings.Contains(lower, "will reset at") {
+	anchor := resetAnchor(msg)
+	if anchor < 0 {
 		return 0, false
 	}
-	ms := ParseBillingTimeMillis(extractWillResetAt(msg))
+	tail := msg[anchor:]
+	ms := ParseBillingTimeMillis(extractWillResetAt(tail))
 	if ms <= 0 {
-		// 旧逻辑解析失败：生产 6004 文案的时间戳后紧跟 ", alternatively…"，逗号不在
-		// 旧截断集里，整段尾巴进解析器必然失败 → 回落固定 2 分钟。改按时间戳形状提取，
-		// 时间戳之后的文案不参与解析。
-		ms = ParseBillingTimeMillis(extractWillResetAtByShape(msg))
+		// 旧逻辑解析失败：生产 6004 文案的时间戳后紧跟 ", alternatively…"或"，您也可以…"，
+		// 逗号不在旧截断集里，整段尾巴进解析器必然失败 → 回落固定 2 分钟。改按时间戳
+		// 形状提取，时间戳之后的文案不参与解析。
+		ms = ParseBillingTimeMillis(extractWillResetAtByShape(tail))
 	}
 	if ms <= 0 {
 		return 0, false
@@ -136,15 +153,9 @@ func ModelRateLimitCooldown(err error, now time.Time) (time.Duration, bool) {
 	return d, true
 }
 
-// extractWillResetAt 截取 "will reset at" 之后的时间戳（v0.4.9.5 原逻辑，保持不变）。
-// 它按标点截断，且只认少数几个 +8 后缀写法。
-func extractWillResetAt(msg string) string {
-	lower := strings.ToLower(msg)
-	idx := strings.Index(lower, "will reset at")
-	if idx < 0 {
-		return ""
-	}
-	raw := strings.TrimSpace(msg[idx+len("will reset at"):])
+// extractWillResetAt 截取重置引导词之后的时间戳（v0.4.9.5 原逻辑，截断集与后缀处理不变）。
+func extractWillResetAt(tail string) string {
+	raw := strings.TrimSpace(tail)
 	if cut := strings.IndexAny(raw, "\n;)]["); cut >= 0 {
 		raw = strings.TrimSpace(raw[:cut])
 	}
@@ -169,13 +180,10 @@ var reChinaZoneSuffix = regexp.MustCompile(`(?i)\s*(?:GMT|UTC)\s*\+\s*0?8(?::?0{
 // extractWillResetAtByShape 按时间戳形状提取，供旧逻辑解析失败时兜底：生产 6004 文案的
 // 时间戳后紧跟 ", alternatively, you can switch to…"（逗号不在旧截断集里），旧逻辑会把
 // 整段文案带进 ParseBillingTimeMillis → 失败 → 回落固定 2 分钟冷却。
-func extractWillResetAtByShape(msg string) string {
-	lower := strings.ToLower(msg)
-	idx := strings.Index(lower, "will reset at")
-	if idx < 0 {
-		return ""
-	}
-	raw := strings.TrimSpace(reWillResetAt.FindString(msg[idx+len("will reset at"):]))
+// 英文与国内中文文案共用这一条：reWillResetAt 只吃到时间戳+时区就停，尾部中文
+// （"重置，您也可以切换其他模型继续使用。"）不参与匹配。
+func extractWillResetAtByShape(tail string) string {
+	raw := strings.TrimSpace(reWillResetAt.FindString(tail))
 	return strings.TrimSpace(reChinaZoneSuffix.ReplaceAllString(raw, ""))
 }
 

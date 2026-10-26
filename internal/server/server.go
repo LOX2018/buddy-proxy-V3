@@ -136,7 +136,18 @@ func activityLogPath() string {
 	return "activity.log"
 }
 
-// LogActivity 写入一条活动事件（懒创建日志器；失败仅告警不阻断）。
+// activityLogDays 读取活动日志保留天数（CODEBUDDY_PROXY_ACTIVITY_DAYS）。
+// 缺省 7 天；<=0 表示不按天数裁剪，只靠字节轮转约束体积。
+func activityLogDays() int {
+	if raw := strings.TrimSpace(os.Getenv("CODEBUDDY_PROXY_ACTIVITY_DAYS")); raw != "" {
+		if n, err := strconv.Atoi(raw); err == nil {
+			return n
+		}
+	}
+	return activitylog.DefaultMaxDays
+}
+
+// LogActivity 写一条活动事件。日志不可用只告警，不阻塞业务（不吞掉调用方）。
 func (s *Server) LogActivity(kind string, fields map[string]any) {
 	s.actOnce.Do(func() {
 		l, err := activitylog.New(activityLogPath())
@@ -144,6 +155,7 @@ func (s *Server) LogActivity(kind string, fields map[string]any) {
 			s.Svc.Log.Warn("activity log unavailable", "path", activityLogPath(), "error", err.Error())
 			return
 		}
+		l.WithMaxDays(activityLogDays())
 		s.act = l
 	})
 	if s.act == nil {
@@ -493,6 +505,8 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request, k
 	if s.Svc != nil && s.Svc.ModelPolicy != nil {
 		if pol, err := s.Svc.ModelPolicy.Read(); err == nil {
 			if reason := pol.RejectReason(providerModel.Model, policySite); reason != "" {
+				// 白名单拒绝也记进报错日志：这类 400 最容易让人误以为"服务挂了"。
+				s.logChatFailure(providerModel.Model, "block", "policy:"+policySite, reason)
 				httputil.WriteJSON(w, http.StatusBadRequest, openai.NewError(reason, "invalid_request_error"))
 				return
 			}
@@ -530,6 +544,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request, k
 		}
 		s.recordChatJournal(chatStarted, proxyRequestID, completeOpts, providerModel.PublicModel, false, false, err.Error(), provider.Usage{}, nil)
 		finish(false, 0, 0, 0, 0, err.Error(), provider.Usage{})
+		s.logChatFailure(providerModel.PublicModel, "block", "complete", err.Error())
 		s.writeChatError(w, http.StatusBadGateway, err)
 		return
 	}
@@ -673,6 +688,7 @@ func (s *Server) streamChat(
 		}
 		s.recordChatJournal(chatStarted, proxyRequestID, opts, providerModel.PublicModel, true, false, err.Error(), provider.Usage{}, nil)
 		finish(false, streamedChars, 0, 0, 0, err.Error(), provider.Usage{})
+		s.logChatFailure(providerModel.PublicModel, "stream", "complete", err.Error())
 		typ, code := openai.ClassifyUpstream(err)
 		cause := openai.ClassifyCause(err)
 		retryAfter := openai.RetryAfter(err)
@@ -1039,6 +1055,7 @@ func (s *Server) handleAdminAPI(w http.ResponseWriter, r *http.Request, path str
 			"ok":      true,
 			"path":    activityLogPath(),
 			"size":    size,
+			"maxDays": activityLogDays(),
 			"entries": entries,
 		})
 		return
@@ -1075,25 +1092,28 @@ func (s *Server) handleAdminAPI(w http.ResponseWriter, r *http.Request, path str
 			"allow":    pol.Allow,
 			"domestic": pol.Domestic,
 			"global":   pol.Global,
+			"windows":  pol.Windows,
+			"now":      time.Now(),
 		})
 		return
 	case path == "/direct-admin/api/system/model-policy" && r.Method == http.MethodPut:
 		var body struct {
-			Enabled  bool                  `json:"enabled"`
-			Allow    []string              `json:"allow"`
-			Domestic modelpolicy.SiteRules `json:"domestic"`
-			Global   modelpolicy.SiteRules `json:"global"`
+			Enabled  bool                     `json:"enabled"`
+			Allow    []string                 `json:"allow"`
+			Domestic modelpolicy.SiteRules    `json:"domestic"`
+			Global   modelpolicy.SiteRules    `json:"global"`
+			Windows  []modelpolicy.TimeWindow `json:"windows"`
 		}
 		if err := httputil.ReadJSON(r, &body); err != nil {
 			httputil.WriteJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "invalid JSON body"})
 			return
 		}
-		pol := modelpolicy.Policy{Enabled: body.Enabled, Allow: body.Allow, Domestic: body.Domestic, Global: body.Global}
+		pol := modelpolicy.Policy{Enabled: body.Enabled, Allow: body.Allow, Domestic: body.Domestic, Global: body.Global, Windows: body.Windows}
 		if err := s.Svc.ModelPolicy.Write(pol); err != nil {
 			httputil.WriteJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
 			return
 		}
-		s.LogActivity("model-policy-update", map[string]any{"enabled": pol.Enabled, "allowCount": len(pol.Allow)})
+		s.LogActivity("model-policy-update", map[string]any{"enabled": pol.Enabled, "allowCount": len(pol.Allow), "windows": len(pol.Windows)})
 		httputil.WriteJSON(w, http.StatusOK, map[string]any{
 			"ok":       true,
 			"path":     s.Svc.ModelPolicy.Path(),
@@ -1102,6 +1122,8 @@ func (s *Server) handleAdminAPI(w http.ResponseWriter, r *http.Request, path str
 			"allow":    pol.Allow,
 			"domestic": pol.Domestic,
 			"global":   pol.Global,
+			"windows":  pol.Windows,
+			"now":      time.Now(),
 		})
 		return
 	// 各账号签到状态。

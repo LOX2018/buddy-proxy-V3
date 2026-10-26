@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"strings"
 	"syscall"
+	"time"
 	"unsafe"
 )
 
@@ -230,11 +231,14 @@ func (a *TrayApp) showMenu() {
 }
 
 func New(tip string) *TrayApp {
-	runtime.LockOSThread()
 	return &TrayApp{Tip: tip}
 }
 
 func (a *TrayApp) Start() error {
+	// 必须锁在 Start 而不是 New：main goroutine 在两次调用之间可能被调度到
+	// 另一个 OS 线程，而 syscall.NewCallback 注册的消息回调要求创建窗口与
+	// 运行消息循环的线程始终固定。
+	runtime.LockOSThread()
 	current = a
 	className := utf16z("CodeBuddyProxyTrayWnd")
 	hInstance, _, _ := procGetModuleHandleW.Call(0)
@@ -279,11 +283,31 @@ func (a *TrayApp) Start() error {
 	nid.UCallbackMessage = WM_TRAYICON
 	nid.HIcon = loadIcon(a.hinstance)
 	copyStringToUTF16(nid.SzTip[:], a.Tip)
-	r, _, _ := procShellNotifyIconW.Call(uintptr(NIM_ADD), uintptr(unsafe.Pointer(&nid)))
-	if r == 0 {
+	added := retryUntil(30*time.Second, 500*time.Millisecond, func() bool {
+		r, _, _ := procShellNotifyIconW.Call(uintptr(NIM_ADD), uintptr(unsafe.Pointer(&nid)))
+		return r != 0
+	})
+	if !added {
+		a.Cleanup()
 		return fmtError("Shell_NotifyIconW failed to add tray icon")
 	}
 	return nil
+}
+
+// retryUntil 每隔 step 调用一次 attempt，直到返回 true 或超过 timeout。
+// 登录刚结束时 explorer 的通知区尚未就绪，NIM_ADD 会立刻返回 FALSE；带上界
+// 重试后托盘会在 shell 就绪时自然出现，而不是当场判死。
+func retryUntil(timeout, step time.Duration, attempt func() bool) bool {
+	deadline := time.Now().Add(timeout)
+	for {
+		if attempt() {
+			return true
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(step)
+	}
 }
 
 func (a *TrayApp) removeIcon() {

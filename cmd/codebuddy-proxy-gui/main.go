@@ -110,14 +110,17 @@ func main() {
 	if err := app.Start(); err != nil {
 		logger.Error("tray start failed", "error", err)
 		srv.LogActivity("server-error", map[string]any{"event": "tray-start-failed", "error": err.Error()})
+		// 先交还单实例锁再弹窗：失败弹窗是阻塞调用，若不先释放，用户在这期间
+		// 再次双击快捷方式会被"已在运行"直接拦掉，无法重试。
+		m.Release()
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		_ = srv.Shutdown(ctx)
 		singleinstance.Popup(
 			"CodeBuddy Proxy 托盘启动失败",
 			"托盘图标创建失败："+err.Error()+"\n服务已停止，请重启程序后再试。",
 			singleinstance.MB_ICONWARNING,
 		)
-		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-		defer cancel()
-		_ = srv.Shutdown(ctx)
 		return
 	}
 

@@ -133,7 +133,7 @@ func TestTailReadsNewestFirst(t *testing.T) {
 	}
 }
 
-func TestNewDayResetKeepsOnlyToday(t *testing.T) {
+func TestNewDayTrimKeepsWithinRetention(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "activity.log")
 	l, err := New(path)
@@ -144,7 +144,7 @@ func TestNewDayResetKeepsOnlyToday(t *testing.T) {
 	l.Recordf("event", "old", 1)
 	l.Recordf("event", "old", 2)
 
-	// 模拟跨天：把内部日期键改到昨天，再写入应触发清空并只保留新记录。
+	// 模拟跨天：把内部日期键改到昨天，再写入应触发裁剪，但保留窗口内的历史记录不丢。
 	l.mu.Lock()
 	l.day = todayKey(time.Now().Add(-24 * time.Hour))
 	l.mu.Unlock()
@@ -154,11 +154,106 @@ func TestNewDayResetKeepsOnlyToday(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Tail: %v", err)
 	}
-	if len(entries) != 1 {
-		t.Fatalf("want only today's 1 entry, got %d entries: %v", len(entries), entries)
+	if len(entries) != 3 {
+		t.Fatalf("want 3 entries (2 kept history + 1 fresh), got %d: %v", len(entries), entries)
 	}
 	if entries[0]["fields"].(map[string]any)["fresh"] != "x" {
-		t.Fatalf("unexpected entries: %v", entries)
+		t.Fatalf("newest entry should be the fresh one: %v", entries)
+	}
+	if size <= 0 {
+		t.Fatalf("size=%d want >0", size)
+	}
+}
+
+func TestNewDayTrimDropsPastCutoff(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "activity.log")
+
+	line := func(daysAgo int, tag string) string {
+		b, _ := json.Marshal(Event{TS: time.Now().Add(-24 * time.Hour * time.Duration(daysAgo)), Kind: "event", Fields: map[string]any{"tag": tag}})
+		return string(b) + "\n"
+	}
+	seed := []byte(line(3, "drop") + line(0, "keep"))
+	if err := os.WriteFile(path, seed, 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	l, err := New(path)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer l.Close()
+	// 模拟跨天：下一次写入按 1 天窗口裁剪（New 时按默认 7 天，两条都还在）。
+	l.WithMaxDays(1)
+	l.mu.Lock()
+	l.day = todayKey(time.Now().Add(-24 * time.Hour))
+	l.mu.Unlock()
+	l.Recordf("event", "fresh", "y")
+
+	entries, _, err := Tail(path, 10)
+	if err != nil {
+		t.Fatalf("Tail: %v", err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("want 2 entries (today kept + fresh), got %d: %v", len(entries), entries)
+	}
+	for _, e := range entries {
+		if f, ok := e["fields"].(map[string]any); ok {
+			if tag, _ := f["tag"].(string); tag == "drop" {
+				t.Fatalf("entry past the 1-day cutoff must be dropped: %v", e)
+			}
+		}
+	}
+}
+
+func TestMaxDaysZeroDisablesTrim(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "activity.log")
+	b, _ := json.Marshal(Event{TS: time.Now().Add(-72 * time.Hour), Kind: "event", Fields: map[string]any{"tag": "ancient"}})
+	if err := os.WriteFile(path, b, 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	l, err := New(path)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	l.WithMaxDays(0)
+	defer l.Close()
+	l.mu.Lock()
+	l.trimLocked()
+	l.mu.Unlock()
+
+	raw, _ := os.ReadFile(path)
+	if !strings.Contains(string(raw), "ancient") {
+		t.Fatalf("maxDays=0 must disable trimming, got %q", raw)
+	}
+}
+
+func TestTailReadsRotatedBackup(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "activity.log")
+
+	l, err := New(path)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	l.WithMaxSize(64)
+	l.Recordf("event", "old", "rotated")
+	l.Recordf("event", "new", "current")
+	if err := l.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	entries, size, err := Tail(path, 10)
+	if err != nil {
+		t.Fatalf("Tail: %v", err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("Tail must span the rotated backup, want 2 entries got %d: %v", len(entries), entries)
+	}
+	if entries[0]["fields"].(map[string]any)["new"] != "current" {
+		t.Fatalf("newest should be the current entry: %v", entries)
 	}
 	if size <= 0 {
 		t.Fatalf("size=%d want >0", size)
@@ -199,11 +294,12 @@ func TestTailDoesNotMutateStalePreviousDayFile(t *testing.T) {
 	}
 }
 
-func TestNewClearsStaleFileOnStartup(t *testing.T) {
+func TestNewKeepsRecentHistoryOnStartup(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "activity.log")
-	old, _ := json.Marshal(Event{TS: time.Now().Add(-48 * time.Hour), Kind: "event", Fields: map[string]any{"old": "yesterday"}})
-	if err := os.WriteFile(path, append(old, '\n'), 0o644); err != nil {
+	// 昨天与两天前都在默认 7 天保留窗口内：重启不得清空。
+	b, _ := json.Marshal(Event{TS: time.Now().Add(-48 * time.Hour), Kind: "event", Fields: map[string]any{"old": "yesterday"}})
+	if err := os.WriteFile(path, append(b, '\n'), 0o644); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
 
@@ -218,33 +314,75 @@ func TestNewClearsStaleFileOnStartup(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Tail: %v", err)
 	}
-	if len(entries) != 1 {
-		t.Fatalf("want 1 fresh entry, got %d: %v", len(entries), entries)
+	if len(entries) != 2 {
+		t.Fatalf("yesterday's history must survive a restart, want 2 got %d: %v", len(entries), entries)
 	}
 	if entries[0]["fields"].(map[string]any)["today"] != "now" {
-		t.Fatalf("unexpected entries: %v", entries)
+		t.Fatalf("newest entry should be the fresh one: %v", entries)
 	}
 }
 
-func TestContainsStaleDay(t *testing.T) {
-	now := time.Now()
-	before := now.Add(-48 * time.Hour)
-	line := func(ts time.Time) string {
-		b, _ := json.Marshal(Event{TS: ts, Kind: "k"})
+func TestNewTrimsBeyondRetentionOnStartup(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "activity.log")
+	line := func(daysAgo int, tag string) string {
+		b, _ := json.Marshal(Event{TS: time.Now().Add(-24 * time.Hour * time.Duration(daysAgo)), Kind: "event", Fields: map[string]any{"tag": tag}})
 		return string(b) + "\n"
 	}
-	today := todayKey(now)
-	if containsStaleDay(strings.NewReader(line(now)), today) {
-		t.Fatal("today entry should not be stale")
+	// 30 天前的记录超出默认 7 天窗口，应被裁掉；轮转备份里的同样要清。
+	if err := os.WriteFile(path, []byte(line(0, "keep")), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
 	}
-	if !containsStaleDay(strings.NewReader(line(before)), today) {
-		t.Fatal("yesterday entry should be stale")
+	if err := os.WriteFile(path+".1", []byte(line(30, "stale-backup")+line(2, "backup-keep")), 0o644); err != nil {
+		t.Fatalf("WriteFile backup: %v", err)
 	}
-	if !containsStaleDay(strings.NewReader(line(before)+line(now)), today) {
-		t.Fatal("mixed-day file should be stale")
+
+	l2, err := New(path)
+	if err != nil {
+		t.Fatalf("New: %v", err)
 	}
-	if containsStaleDay(strings.NewReader("not json\n\n"), today) {
-		t.Fatal("garbage lines should be ignored")
+	defer l2.Close()
+
+	entries, _, err := Tail(path, 10)
+	if err != nil {
+		t.Fatalf("Tail: %v", err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("want backup-keep + keep, got %d: %v", len(entries), entries)
+	}
+	for _, e := range entries {
+		if f, ok := e["fields"].(map[string]any); ok {
+			if tag, _ := f["tag"].(string); tag == "stale-backup" {
+				t.Fatalf("rotated backup past the retention window must be pruned: %v", e)
+			}
+		}
+	}
+	if _, err := os.Stat(path + ".1"); !os.IsNotExist(err) {
+		t.Fatalf("backup should be consumed by the trim, stat err=%v", err)
+	}
+}
+
+func TestTrimDropsGarbageLines(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "activity.log")
+	b, _ := json.Marshal(Event{TS: time.Now(), Kind: "event", Fields: map[string]any{"tag": "good"}})
+	seed := []byte("not json\n\n" + string(b) + "\n")
+	if err := os.WriteFile(path, seed, 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	l2, err := New(path)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer l2.Close()
+
+	raw, _ := os.ReadFile(path)
+	if strings.Contains(string(raw), "not json") {
+		t.Fatalf("unparseable lines should be dropped by the trim: %q", raw)
+	}
+	if !strings.Contains(string(raw), "good") {
+		t.Fatalf("parseable entries must be kept: %q", raw)
 	}
 }
 

@@ -7,6 +7,39 @@
 
 ---
 
+## v5.4 · 2026-10-16 · 托盘启动失败不再拖死桌面（开机 shell 未就绪自动重试）
+
+### 根因
+
+重启后 `Shell_NotifyIconW(NIM_ADD)` 在 explorer 通知区尚未就绪时立刻返回 FALSE。v5.2 新增的失败路径紧接着调用 `MessageBoxW`，并把 `GetForegroundWindow()` 当作窗口所有者——登录阶段前台窗口属于 explorer，而 explorer 线程正忙于加载 shell 扩展；模态对话框必须等待所有者线程的泵消息锁，于是弹出来却永不响应，桌面表现为整体卡死。同时进程还持有单实例互斥量，用户在这期间再双击快捷方式会被"已在运行"直接拦掉，无法重试。
+
+活动日志实锤（`~/.codebuddy/activity/activity.log`）：
+
+```json
+{"ts":"2026-10-16T12:13:13.8063532+08:00","kind":"server-error","fields":{"error":"Shell_NotifyIconW failed to add tray icon","event":"tray-start-failed"}}
+{"ts":"2026-10-16T12:18:38.6747094+08:00","kind":"server-error","fields":{"error":"Shell_NotifyIconW failed to add tray icon","event":"tray-start-failed"}}
+```
+
+### 改动
+
+- **通知区就绪自动重试。** `NIM_ADD` 失败后每 500ms 重试一次、上限 30s；shell 就绪时图标自然出现，不再当场判死。重试仍失败时才走失败路径，并且先销毁已创建的隐藏窗口再返回。
+- **弹窗不再挂 explorer 线程。** `Popup` 改为无窗口所有者 + `MB_TOPMOST|MB_SETFOREGROUND`，模态对话框不再等待其他线程的泵消息锁，任何时刻都可点击。
+- **失败路径先交还单实例锁。** 弹窗是阻塞调用，先 `m.Release()` 再弹，用户在这期间再次双击就能立即重试，不再被"已在运行"拦下。
+- **窗口线程锁定位置修正。** `runtime.LockOSThread()` 从 `New()` 移到 `Start()`：`New` 与 `Start` 之间 goroutine 可能被调度到另一个 OS 线程，而 `syscall.NewCallback` 注册的消息回调要求创建窗口与运行消息循环的线程始终固定。
+- **部署脚本可自愈。** `dist/启动代理.bat`、`dist/启动代理GUI.bat` 原先硬编码 `CodeBuddy-系统托盘版.exe`（该文件并不存在，脚本点了也起不来），改为按修改时间自动挑选 `codebuddy-proxy-gui-windows-x64-v*.exe` 中最新的一个；同时统一为纯 ASCII + CRLF + 无 BOM，避免 cmd 代码页解析异常。
+- **桌面快捷方式指向 v5.4。**
+
+### 验证
+
+- `internal/tray` 新增 3 个测试（首次成功 / 重试到成功 / 到期限彻底失败），`go test ./...` 全绿，`go vet ./...` 干净。
+- 端到端：`dist\启动代理.bat` 正确选中并启动 v5.4；`127.0.0.1:32126` 正常监听，`GET /direct-admin/` 返回 200；`taskkill`（WM_CLOSE）后消息循环正常退出并释放端口，说明线程锁定位置调整未破坏消息泵。
+
+### 兼容性
+
+- 开机自启仍建议放在"启动"文件夹快捷方式上。若登录时 shell 尚在初始化，托盘图标会延迟最多 30s 出现；由于启动顺序是"先托盘后服务"，这段等待期间 HTTP 服务尚未开始监听，托盘就绪后服务才上线。
+
+---
+
 ## v5.2 · 2026-10-16 · 单实例锁 + 启动失败即退出（消除双实例与无托盘僵尸进程）
 
 ### 改动

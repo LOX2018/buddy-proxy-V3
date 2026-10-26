@@ -12,16 +12,17 @@ var (
 	kernel32 = syscall.NewLazyDLL("kernel32.dll")
 	user32   = syscall.NewLazyDLL("user32.dll")
 
-	procCreateMutexW        = kernel32.NewProc("CreateMutexW")
-	procCloseHandle         = kernel32.NewProc("CloseHandle")
-	procMessageBoxW         = user32.NewProc("MessageBoxW")
-	procGetForegroundWindow = user32.NewProc("GetForegroundWindow")
+	procCreateMutexW = kernel32.NewProc("CreateMutexW")
+	procCloseHandle  = kernel32.NewProc("CloseHandle")
+	procMessageBoxW  = user32.NewProc("MessageBoxW")
 )
 
 const (
 	ERROR_ALREADY_EXISTS = 183
 	MF_OK                = 0x00000000
 	MB_ICONWARNING       = 0x00000030
+	MB_TOPMOST           = 0x00000080
+	MB_SETFOREGROUND     = 0x00000100
 )
 
 // Mutex 表示一个进程级独占锁，持有时禁止其他实例以同一名字获取。
@@ -62,15 +63,19 @@ func (m *Mutex) Release() {
 
 // Popup 用系统级 MessageBox 弹出一个模态对话框。用于错误提示（尤其无托盘
 // 残留时），标题与正文按 UTF-16 传给 Win32；返回用户点击的按钮码。
+//
+// 不传窗口句柄作为所有者：启动失败弹窗常发生在登录阶段，此时前台窗口属于
+// explorer.exe，而 explorer 的线程正忙于加载 shell 扩展。把外部件句柄当作
+// 所有者会让模态对话框等待对方线程的泵消息锁，结果是"桌面卡死"——对话框
+// 永不响应。无所有者 + TOPMOST/SETFOREGROUND 保证对话框自身始终可点击。
 func Popup(title, text string, icon uint32) uint32 {
-	hwnd, _, _ := procGetForegroundWindow.Call()
 	t16, _ := syscall.UTF16PtrFromString(title)
 	m16, _ := syscall.UTF16PtrFromString(text)
 	r, _, _ := procMessageBoxW.Call(
-		hwnd,
+		0,
 		uintptr(unsafe.Pointer(m16)),
 		uintptr(unsafe.Pointer(t16)),
-		uintptr(MF_OK|icon),
+		uintptr(MF_OK|icon|MB_TOPMOST|MB_SETFOREGROUND),
 	)
 	return uint32(r)
 }

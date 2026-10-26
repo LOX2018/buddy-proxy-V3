@@ -179,6 +179,38 @@ func TestModelRateLimitCooldownRealWorld6004Tail(t *testing.T) {
 	}
 }
 
+// 国内站 6004 文案是"将在 … 重置"，不含 "will reset at"：必须解析出真实重置时刻，
+// 否则限流窗口内每个账号都只回落固定 2 分钟冷却，被反复打白消耗请求。
+func TestModelRateLimitCooldownChineseDomestic6004(t *testing.T) {
+	loc, err := time.LoadLocation("Asia/Shanghai")
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 10, 16, 2, 24, 0, 0, loc)
+	msg := errors.New("CodeBuddy chat completion failed with 429: 您的使用量已超出频率限制，将在 2026-10-16 23:00:00 UTC+8 重置，您也可以切换其他模型继续使用。 (code 6004) [region=domestic site=domestic endpoint=https://copilot.tencent.com/v2/chat/completions domain=copilot.tencent.com model=hy4-preview]")
+	d, ok := ModelRateLimitCooldown(msg, now)
+	if !ok {
+		t.Fatal("domestic Chinese 6004 message must parse; ok=false falls back to the fixed 2m cooldown")
+	}
+	want := time.Date(2026, 10, 16, 23, 0, 0, 0, loc).Sub(now)
+	if d != want {
+		t.Fatalf("cooldown=%s want=%s", d, want)
+	}
+}
+
+// 没有重置引导词就不能猜时刻：宁可回落固定冷却，也不能把普通时间戳当重置点。
+func TestModelRateLimitCooldownRejectsTimestampWithoutAnchor(t *testing.T) {
+	now := time.Date(2026, 10, 16, 2, 24, 0, 0, time.UTC)
+	for _, msg := range []string{
+		"failed with 429: 6004 rate-model usage exceeds limit, retry at 2026-10-16 23:00:00 UTC+8",
+		"failed with 429: 6004 rate-model 使用量超限，可稍后重试 2026-10-16 23:00:00 UTC+8",
+	} {
+		if _, ok := ModelRateLimitCooldown(errors.New(msg), now); ok {
+			t.Fatalf("timestamp without a reset anchor must not be treated as a reset time: %q", msg)
+		}
+	}
+}
+
 // 提取器换成"按时间戳形状"后，旧实现能吃下的非日期形态（epoch 数字、带空格的
 // UTC +8）不能丢——它们由 ParseBillingTimeMillis 的数字分支与旧截断路径兜底。
 func TestModelRateLimitCooldownKeepsLegacyInputForms(t *testing.T) {

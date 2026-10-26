@@ -104,6 +104,7 @@ func (s *Server) handleResponses(w http.ResponseWriter, r *http.Request, keySite
 		}
 		s.recordChatJournal(chatStarted, proxyRequestID, completeOpts, providerModel.PublicModel, false, false, err.Error(), provider.Usage{}, nil)
 		finish(false, 0, 0, 0, 0, err.Error(), provider.Usage{})
+		s.logChatFailure(providerModel.PublicModel, "block", "complete", err.Error())
 		typ, _ := openai.ClassifyUpstream(err)
 		s.writeResponsesError(w, http.StatusBadGateway, typ, err.Error())
 		return
@@ -262,6 +263,7 @@ func (s *Server) streamResponses(
 		}
 		s.recordChatJournal(chatStarted, proxyRequestID, opts, providerModel.PublicModel, true, false, err.Error(), provider.Usage{}, nil)
 		finish(false, streamedChars, 0, 0, 0, err.Error(), provider.Usage{})
+		s.logChatFailure(providerModel.PublicModel, "stream", "complete", err.Error())
 		typ, _ := openai.ClassifyUpstream(err)
 		retryAfter := openai.RetryAfter(err)
 		writeLocked(func() {

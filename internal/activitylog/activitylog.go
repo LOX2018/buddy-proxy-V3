@@ -3,7 +3,6 @@ package activitylog
 import (
 	"encoding/json"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -16,6 +15,8 @@ const (
 	MaxFileSizeBytes = 4 << 20
 	// DefaultDirName 默认日志目录名（相对主目录扩展后为 ~/.codebuddy/activity）。
 	DefaultDirName = ".codebuddy"
+	// DefaultMaxDays 默认保留天数：早于该窗口的记录在启动或跨天时被裁掉。
+	DefaultMaxDays = 7
 )
 
 // DefaultPath 返回默认活动日志路径 ~/.codebuddy/activity/activity.log。
@@ -27,13 +28,15 @@ func DefaultPath() (string, error) {
 	return filepath.Join(home, DefaultDirName, "activity", "activity.log"), nil
 }
 
-// Logger 是追加式 JSONL 活动日志（一行一条事件），每日零点自动清空重建，只保留当天记录。
+// Logger 是追加式 JSONL 活动日志（一行一条事件）。跨天或启动时按保留天数裁剪
+// 历史，只删早于保留窗口的记录——不会每日整文件清空，历史可回看。
 type Logger struct {
-	mu   sync.Mutex
-	path string
-	max  int64
-	file *os.File
-	day  string
+	mu      sync.Mutex
+	path    string
+	max     int64
+	maxDays int
+	file    *os.File
+	day     string
 }
 
 // Event 是写入日志的标准化事件结构。
@@ -44,7 +47,7 @@ type Event struct {
 }
 
 // New 创建/打开日志文件（不存在则创建），按 Append 复用。
-// 若日志文件含非当天事件（前一日遗留或多日混存），则清空重建：只保留当天日志。
+// 打开后先裁剪一次：保留最近 maxDays 天的记录，早于窗口的行被丢弃。
 func New(path string) (*Logger, error) {
 	if path == "" {
 		return nil, fmt.Errorf("activitylog: empty path")
@@ -56,36 +59,11 @@ func New(path string) (*Logger, error) {
 	if err != nil {
 		return nil, err
 	}
-	l := &Logger{path: path, max: MaxFileSizeBytes, file: f, day: todayKey(time.Now())}
-	if rf, err := os.Open(path); err == nil {
-		stale := containsStaleDay(rf, l.day)
-		_ = rf.Close()
-		if stale {
-			l.resetForTodayLocked()
-		}
-	}
+	l := &Logger{path: path, max: MaxFileSizeBytes, maxDays: DefaultMaxDays, file: f, day: todayKey(time.Now())}
+	l.mu.Lock()
+	l.trimLocked()
+	l.mu.Unlock()
 	return l, nil
-}
-
-// containsStaleDay 报告文件中是否存在 ts 日期不等于 given 的事件（参数控管便于单测）。
-func containsStaleDay(r io.Reader, given string) bool {
-	raw, err := io.ReadAll(r)
-	if err != nil {
-		return false
-	}
-	for _, line := range strings.Split(string(raw), "\n") {
-		if strings.TrimSpace(line) == "" {
-			continue
-		}
-		var ev Event
-		if err := json.Unmarshal([]byte(line), &ev); err != nil {
-			continue
-		}
-		if todayKey(ev.TS) != given {
-			return true
-		}
-	}
-	return false
 }
 
 // WithMaxSize 设置触发轮转的字节上限。
@@ -93,6 +71,12 @@ func (l *Logger) WithMaxSize(n int64) *Logger {
 	if n > 0 {
 		l.max = n
 	}
+	return l
+}
+
+// WithMaxDays 设置保留天数；<=0 表示不限天数（只靠字节轮转约束）。
+func (l *Logger) WithMaxDays(n int) *Logger {
+	l.maxDays = n
 	return l
 }
 
@@ -117,7 +101,7 @@ func (l *Logger) Record(kind string, fields map[string]any) {
 	l.write(line)
 }
 
-// Recordf 以键值对方式写入事件（等价于 map[string]any 构造）。
+// Recordf 以键值对形式写入事件（等价于 map[string]any 构造）。
 func (l *Logger) Recordf(kind string, kv ...any) {
 	if len(kv)%2 != 0 {
 		kv = kv[:len(kv)-1]
@@ -136,8 +120,8 @@ func (l *Logger) Recordf(kind string, kv ...any) {
 func (l *Logger) write(line []byte) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	l.maybeResetNewDay()
-	l.maybeRotateLocked()
+	l.maybeTrimLocked()
+	l.rotateLocked()
 	if l.file == nil {
 		return
 	}
@@ -150,29 +134,63 @@ func todayKey(t time.Time) string {
 	return t.Format("2006-01-02")
 }
 
-// maybeResetNewDay 在跨天后清空重建日志文件，仅保留当天记录。
-func (l *Logger) maybeResetNewDay() {
+// maybeTrimLocked 在跨天后按保留天数裁剪历史。同日写入是零开销判断。
+func (l *Logger) maybeTrimLocked() {
 	if l.day != todayKey(time.Now()) {
-		l.resetForTodayLocked()
+		l.day = todayKey(time.Now())
+		l.trimLocked()
 	}
 }
 
-// resetForTodayLocked 清空当前文件并移除轮转备份，确保只保留当天日志。
-func (l *Logger) resetForTodayLocked() {
-	l.day = todayKey(time.Now())
+// trimLocked 合并轮转备份 *.1 与主文件（*.1 恒早于主文件），丢弃早于保留窗口
+// 的事件，重写主文件并清掉备份。maxDays<=0 时不裁剪。
+// 读到的坏行一并丢弃，避免无法判定时间的数据长期留在盘上。
+func (l *Logger) trimLocked() {
+	if l.maxDays <= 0 {
+		return
+	}
+	cutoff := time.Now().Add(-24 * time.Hour * time.Duration(l.maxDays))
 	if l.file != nil {
 		_ = l.file.Close()
 		l.file = nil
 	}
+	kept := make([]string, 0, 64)
+	for _, p := range []string{l.path + ".1", l.path} {
+		raw, err := os.ReadFile(p)
+		if err != nil {
+			continue
+		}
+		for _, line := range strings.Split(string(raw), "\n") {
+			if strings.TrimSpace(line) == "" {
+				continue
+			}
+			var ev Event
+			if json.Unmarshal([]byte(line), &ev) != nil {
+				continue
+			}
+			if ev.TS.Before(cutoff) {
+				continue
+			}
+			kept = append(kept, line)
+		}
+	}
 	_ = os.Remove(l.path + ".1")
+	out := []byte(strings.Join(kept, "\n"))
+	if len(kept) > 0 {
+		out = append(out, '\n')
+	}
 	f, err := os.OpenFile(l.path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC|os.O_APPEND, 0o600)
 	if err != nil {
 		return
 	}
 	l.file = f
+	if len(out) > 0 {
+		_, _ = f.Write(out)
+	}
 }
 
-func (l *Logger) maybeRotateLocked() {
+// rotateLocked 在超过字节上限时把主文件轮转为 *.1（先删旧备份再改名）。
+func (l *Logger) rotateLocked() {
 	if l.max <= 0 || l.file == nil {
 		return
 	}
@@ -195,29 +213,35 @@ func (l *Logger) maybeRotateLocked() {
 	l.file = f
 }
 
-// Tail 返回文件末尾最近 n 条事件（从新到旧）与文件当前字节数。
-// 文件不存在时返回空切片与 size=0，不视为错误。
-// Tail 只读：不截断、不删除轮转备份，避免 GET 视口产生副作用。
+// Tail 返回末尾最近 n 条事件（从新到旧）与合并后的字节数。
+// 轮转备份 *.1 与主文件都会被读到，保留窗口内的历史不会因轮转而消失。
+// 文件都不存在时返回空切片与 size=0，不视为错误。
+// Tail 只读：不裁剪、不删除轮转备份，避免 GET 视口产生副作用。
 func Tail(path string, n int) ([]map[string]any, int64, error) {
 	if n <= 0 {
 		n = 100
 	}
-	fi, err := os.Stat(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, 0, nil
+	var (
+		size  int64
+		lines []string
+	)
+	for _, p := range []string{path + ".1", path} {
+		fi, err := os.Stat(p)
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return nil, size, err
 		}
-		return nil, 0, err
-	}
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		return nil, fi.Size(), err
-	}
-	all := strings.Split(string(raw), "\n")
-	lines := make([]string, 0, len(all))
-	for _, line := range all {
-		if strings.TrimSpace(line) != "" {
-			lines = append(lines, line)
+		raw, err := os.ReadFile(p)
+		if err != nil {
+			return nil, size, err
+		}
+		size += fi.Size()
+		for _, line := range strings.Split(string(raw), "\n") {
+			if strings.TrimSpace(line) != "" {
+				lines = append(lines, line)
+			}
 		}
 	}
 	start := len(lines) - n
@@ -236,5 +260,5 @@ func Tail(path string, n int) ([]map[string]any, int64, error) {
 	for i, j := 0, len(entries)-1; i < j; i, j = i+1, j-1 {
 		entries[i], entries[j] = entries[j], entries[i]
 	}
-	return entries, fi.Size(), nil
+	return entries, size, nil
 }
